@@ -36,10 +36,9 @@ where `ROOT` is the parent directory of `backend/`. If this file is absent the e
 |---|---|---|
 | `cooldown_seconds` | `3.0` | Minimum seconds between events for the same shelf slot. Prevents duplicate events when a product is held in view. |
 | `consistency_frames` | `3` | Number of consecutive frames where a count change must be observed before an event is emitted. Acts as an anti-flicker filter. |
-| `STOCK_INITIAL` | `8` | Baseline units per SKU used to compute `stock_level` (`ok` / `warning` / `critical`) on each detected bounding box. |
 
 <Note>
-`STOCK_INITIAL` is also defined independently in `inventory_engine.py` (see below). Both constants must agree. The detection engine uses it only for visual stock-level colouring on debug frames; the inventory engine uses it to track real stock counts.
+`detection_engine.py` also defines a module-level constant `STOCK_INITIAL = 8` (separate from the `DetectionEngine` class). It is used only for visual stock-level colouring (`ok` / `warning` / `critical`) on debug frames and is not an instance attribute. The same constant is defined independently in `inventory_engine.py` (see below) where it governs actual stock tracking — both must agree.
 </Note>
 
 ### Changing Detection Parameters at Runtime
@@ -248,7 +247,7 @@ The frontend development server runs on **port 3000** by default.
 | `cooldown_seconds` | `detection_engine.py` | `3.0` | No | Per-slot event cooldown (seconds) |
 | `consistency_frames` | `detection_engine.py` | `3` | No | Frames required to confirm a change |
 | `save_frames` | `detection_engine.py` | `False` | No | Save annotated debug frames to disk |
-| `STOCK_INITIAL` (detection) | `detection_engine.py` | `8` | No | Baseline units per SKU for stock-level colouring |
+| `STOCK_INITIAL` (module constant) | `detection_engine.py` | `8` | No | Baseline units per SKU for debug-frame stock-level colouring (module-level, not an instance attribute) |
 | `STOCK_INITIAL` (inventory) | `inventory_engine.py` | `8` | No | Baseline units per SKU for inventory tracking |
 | `CONFIDENCE_THRESHOLD` | `inventory_engine.py` | `0.15` | No | Minimum event confidence to process |
 | `MIN_THRESHOLD` | `inventory_engine.py` | `0.20` | **Yes** — `PUT /api/config/threshold` | Alert when stock ≤ threshold × initial |

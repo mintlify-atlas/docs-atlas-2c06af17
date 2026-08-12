@@ -1,7 +1,7 @@
 ---
 title: "Intelligence Engines: Prediction, Heatmap, and Narratives"
 sidebarTitle: "Intelligence Engines"
-description: "Three intelligence modules — PredictionEngine, HeatmapEngine, and NarrativeEngine — enrich raw inventory events with stockout forecasts, activity heatmaps, and Spanish narrative alerts."
+description: "PredictionEngine, HeatmapEngine, and NarrativeEngine enrich raw inventory events with stockout forecasts, heatmaps, and Spanish narrative alerts."
 ---
 
 Anaquel Inteligente 3B ships three intelligence modules that sit above the core inventory layer and transform raw stock events into actionable insights. **PredictionEngine (M6)** forecasts when each product will run out, **HeatmapEngine (M7)** tracks slot interaction intensity over a sliding time window, and **NarrativeEngine (M8)** produces human-readable Spanish-language status messages. All three are attached to `InventoryEngine` via observer callbacks registered at application startup in `main.py`.
@@ -235,7 +235,7 @@ Generates a narrative message from one of the built-in templates. Returns `None`
   </Tab>
 </Tabs>
 
-### `get_recent(limit=10) -> list[NarrativeMessage]`
+### `get_recent(limit=50) -> list[NarrativeMessage]`
 
 Returns the last `limit` generated messages in reverse-chronological order (most recent first).
 

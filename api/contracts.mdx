@@ -132,6 +132,24 @@ class EventType(Enum):
 
 ---
 
+### `AnnotatedFrame`
+
+**Contract C3 (internal to M2)** — pairs a raw video frame with its detection results. Used internally by the camera pipeline and video overlay (`VideoOverlay`) to render bounding-box annotations before encoding the frame for broadcast. This type is **not transmitted over the WebSocket or REST API** — it exists only within the M2 camera-processing thread.
+
+<ResponseField name="frame" type="numpy.ndarray" required>
+  Raw BGR image array as returned by OpenCV. Not JSON-serializable; used only in-process.
+</ResponseField>
+
+<ResponseField name="timestamp" type="float" required>
+  Unix timestamp (seconds since epoch) when the frame was captured.
+</ResponseField>
+
+<ResponseField name="detections" type="list[SlotDetection]" required>
+  The `SlotDetection` results associated with this frame.
+</ResponseField>
+
+---
+
 ### `ProductStock`
 
 **Contract C5** — the authoritative stock state for a single SKU as maintained by the Inventory Engine (M3). Broadcast on every `inventory_update` and `alert` WebSocket event.
@@ -428,7 +446,7 @@ The table below shows which contract is consumed by which engine module.
 | Contract | Dataclass(es)                          | Producer | Consumer(s)         |
 | -------- | -------------------------------------- | -------- | ------------------- |
 | C2       | `DetectionEvent`, `EventType`          | M2       | M3                  |
-| C3       | `SlotDetection`, `DetectionResult`     | M2       | M2 (internal)       |
+| C3       | `SlotDetection`, `DetectionResult`, `AnnotatedFrame` | M2 | M2 (internal) |
 | C4       | `InteractionEvent`                     | M3       | M7                  |
 | C5       | `ProductStock`, `InventoryState`, `InventoryEvent` | M3 | M4, WebSocket, REST |
 | C6       | `SKUHistory`, `StockPrediction`        | M3       | M6                  |

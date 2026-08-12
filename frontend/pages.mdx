@@ -1,7 +1,7 @@
 ---
-title: "Dashboard Pages: Live Panel, Analytics, Activity, Catalog"
+title: "Dashboard Pages: LivePanel, Analytics, Activity & Catalog"
 sidebarTitle: "Pages"
-description: "Detailed guide to all four dashboard pages: LivePanel, ProductCatalog, Analytics, and Activity — what each renders and how they consume real-time WebSocket data."
+description: "Guide to all four dashboard pages: LivePanel, ProductCatalog, Analytics, and Activity — what each renders and how they consume real-time socket data."
 ---
 
 The dashboard has four pages, each a standalone React component living in `src/pages/`. All four are mounted inside the shared `Layout` shell (sidebar + main content area) and every one of them reads exclusively from the `SocketContext` provided by `useSocket` — there are no local fetches or independent state managers. Data flows in one direction: backend → Socket.IO → `useSocket` state → `useSocketContext()` → page render.

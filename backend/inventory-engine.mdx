@@ -1,7 +1,7 @@
 ---
 title: "Inventory Engine: Real-Time Stock State Management"
 sidebarTitle: "Inventory Engine"
-description: "InventoryEngine is the core M3 module that maintains stock counters for 7 SKUs, applies business logic, fires alert callbacks, and exposes analytics and restock recommendations."
+description: "InventoryEngine (M3) maintains stock counters for 7 SKUs, applies business logic, fires alert callbacks, and exposes analytics and restock recommendations."
 ---
 
 The **InventoryEngine** is module **M3** of the Anaquel Inteligente 3B system. It is the single authoritative source of stock truth: it accepts `DetectionEvent` objects from M2, applies business rules to update per-SKU counters, and notifies downstream modules (M4, M6, M8) through the **observer pattern**. All internal state mutations are protected by a `threading.Lock`, making the engine safe to call from the camera thread while REST and WebSocket handlers read concurrently.
@@ -34,6 +34,7 @@ The engine pre-seeds its state with the following 7 products, drawn directly fro
 | `CONFIDENCE_THRESHOLD` | `0.15` | Events with `confidence` below this are silently ignored. |
 | `MIN_THRESHOLD` | `0.20` | Alert fires when `stock_current ≤ STOCK_INITIAL × 0.20` (≤ 1.6 units, effectively ≤ 1). |
 | `MAX_EVENTS` | `1000` | Maximum `InventoryEvent` objects kept in the in-memory deque. |
+| `MAX_TIMESTAMPS_PER_SKU` | `500` | Maximum removal timestamps stored per SKU in `_event_timestamps` (consumed by M6). |
 
 ---
 
@@ -204,6 +205,10 @@ Returns a real-time KPI snapshot of the shelf.
 
 <ResponseField name="most_sold_sku" type="str | None">
   The `sku_id` with the highest removal count, or `None` if no events yet.
+</ResponseField>
+
+<ResponseField name="least_sold_sku" type="str | None">
+  The `sku_id` with the lowest removal count, or `None` if no events yet.
 </ResponseField>
 
 <ResponseField name="products" type="list[dict]">

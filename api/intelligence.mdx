@@ -91,7 +91,7 @@ curl http://localhost:8000/api/predictions
 
 ## GET /api/heatmap
 
-Returns a map of shelf slot activity counts within a configurable time window. Activity is recorded by `HeatmapEngine` (M7) each time any `InventoryEvent` is processed. The keys in the response object are slot identifiers; the values are the number of interactions recorded within the window.
+Returns a structured heatmap of shelf slot activity within a configurable time window. Activity is recorded by `HeatmapEngine` (M7) each time any `InventoryEvent` is processed. The response contains a `slots` array ordered by descending intensity (the most active slot has `intensity = 1.0`), the window duration, and a timestamp.
 
 <ParamField query="window" type="integer" default="300">
   Time window in seconds over which to aggregate slot interactions. Minimum `10`, maximum `3600` (1 hour).
@@ -101,17 +101,35 @@ Returns a map of shelf slot activity counts within a configurable time window. A
 curl "http://localhost:8000/api/heatmap?window=600"
 ```
 
-**Example response (slot IDs as keys, interaction counts as values):**
+### Heatmap Response Fields
+
+<ResponseField name="slots" type="array">
+  Array of slot objects sorted by `intensity` descending. Each object contains:
+  - `slot_id` (integer) — physical shelf slot number
+  - `sku_id` (string) — SKU occupying that slot
+  - `activity_count` (integer) — number of interactions recorded within the window
+  - `intensity` (float) — normalized activity score; the busiest slot has `1.0`, others are proportional
+</ResponseField>
+
+<ResponseField name="window_seconds" type="integer">
+  The time window used to filter interactions, as passed in the `window` query parameter.
+</ResponseField>
+
+<ResponseField name="last_updated" type="string">
+  ISO 8601 datetime when the heatmap was computed.
+</ResponseField>
+
+**Example response:**
 
 ```json
 {
-  "4": 7,
-  "6": 3,
-  "3": 1,
-  "1": 0,
-  "2": 0,
-  "5": 0,
-  "7": 0
+  "slots": [
+    { "slot_id": 4, "sku_id": "nachos_naturasol", "activity_count": 7, "intensity": 1.0 },
+    { "slot_id": 6, "sku_id": "sisi_cola",        "activity_count": 3, "intensity": 0.43 },
+    { "slot_id": 3, "sku_id": "burst_energy",     "activity_count": 1, "intensity": 0.14 }
+  ],
+  "window_seconds": 600,
+  "last_updated": "2024-11-15T10:55:00.123456"
 }
 ```
 
@@ -136,7 +154,7 @@ curl "http://localhost:8000/api/narratives?limit=5"
 ### NarrativeMessage Object
 
 <ResponseField name="message_id" type="string">
-  UUID v4 uniquely identifying this narrative message.
+  12-character lowercase hex string uniquely identifying this narrative message (first 12 hex digits of a UUID v4).
 </ResponseField>
 
 <ResponseField name="severity" type="string">
@@ -167,20 +185,20 @@ curl "http://localhost:8000/api/narratives?limit=5"
 ```json
 [
   {
-    "message_id": "d4f2a901-7c3e-4b8f-a012-9876543210ef",
-    "severity": "warning",
-    "text": "⚠️ Nachos Con Sal Naturasol 200gr está al 37% — considera reabastecer pronto.",
+    "message_id": "d4f2a9017c3e",
+    "severity": "critical",
+    "text": "⚠️ ¡ALERTA! Nachos Con Sal Naturasol 200gr alcanzó el umbral crítico (25%). Reponer urgente.",
     "sku_id": "nachos_naturasol",
     "timestamp": "2024-11-15T10:50:22.100000",
     "icon": "⚠️"
   },
   {
-    "message_id": "e5a3b012-8d4f-4c9a-b123-0987654321fe",
+    "message_id": "e5a3b0128d4f",
     "severity": "info",
-    "text": "🛍️ Se retiró 1 unidad de Refresco Cola Sin Azucar Sisi 355ml. Stock actual: 6.",
+    "text": "📦 Refresco Cola Sin Azucar Sisi 355ml retirado del anaquel. Stock actual: 6 unidades",
     "sku_id": "sisi_cola",
     "timestamp": "2024-11-15T10:49:55.880000",
-    "icon": "🛍️"
+    "icon": "📦"
   }
 ]
 ```

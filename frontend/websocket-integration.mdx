@@ -1,7 +1,7 @@
 ---
-title: "WebSocket Integration with useSocket Hook"
+title: "useSocket Hook: WebSocket & Socket.IO Real-Time Integration"
 sidebarTitle: "WebSocket Integration"
-description: "The useSocket React hook manages the Socket.IO connection, handles reconnection, and exposes live inventory, predictions, heatmap, narrative, and video frame state."
+description: "The useSocket React hook manages the Socket.IO connection, handles reconnection, and exposes live inventory, predictions, heatmap, and video frame state."
 ---
 
 `useSocket` is the central data hub for all real-time updates in the Anaquel Inteligente 3B dashboard. Defined in `src/hooks/useSocket.ts`, it creates a single Socket.IO connection to the FastAPI backend, registers handlers for every server-emitted event, and returns a unified `SocketState` object that every page component consumes via React Context. On startup the hook immediately seeds state with mock data, attempts to connect, and switches to live data as soon as the backend responds — providing a seamless fallback without additional configuration.

@@ -78,7 +78,7 @@ Before you begin, make sure the following are available on your machine:
     npm run dev
     ```
 
-    Vite starts the development server. The default port is **5173** — open `http://localhost:5173` in your browser.
+    Vite starts the development server. The project's `vite.config.ts` sets the port to **3000** — open `http://localhost:3000` in your browser.
 
     <Tip>
       If you only want a quick sanity check without running the full React frontend, the backend ships a self-contained HTML dashboard at `http://localhost:8000/dashboard`. It polls the REST API every 3 seconds, shows live KPIs and inventory cards for all 7 SKUs, and renders the priority restock table. No Node.js required.
@@ -88,7 +88,7 @@ Before you begin, make sure the following are available on your machine:
   <Step title="Verify both services are running">
     | URL | What you should see |
     |-----|---------------------|
-    | `http://localhost:5173` | React dashboard with live Socket.IO connection indicator |
+    | `http://localhost:3000` | React dashboard with live Socket.IO connection indicator |
     | `http://localhost:8000/docs` | Swagger UI listing all REST endpoints |
     | `http://localhost:8000/api/health` | `{"status": "ok", "uptime": <seconds>}` |
     | `http://localhost:8000/dashboard` | Embedded HTML inventory dashboard |

@@ -1,7 +1,7 @@
 ---
-title: "Inventory Endpoints: Stock State and Product Data"
+title: "Inventory Endpoints: Real-Time Stock State and Lookup"
 sidebarTitle: "Inventory"
-description: "REST endpoints for querying real-time inventory state, individual product stock, and triggering inventory resets. All responses reflect the live InventoryEngine state."
+description: "HTTP routes for querying real-time inventory state, looking up individual products by SKU, and resetting all stock levels to initial values."
 ---
 
 These endpoints expose the `InventoryEngine` state via HTTP. The engine maintains a thread-safe in-memory store for all 7 shelf products, applying business logic (stock decrements, alert thresholds, event deduplication) before surfacing data through these routes. Every response reflects the most current state at request time.

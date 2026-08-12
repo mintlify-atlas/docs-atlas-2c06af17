@@ -1,7 +1,7 @@
 ---
-title: "Events Endpoints: Detection Events and Simulation"
+title: "Events Endpoints: History, Simulation, and Mock Events"
 sidebarTitle: "Events"
-description: "Endpoints to query the event history, simulate product removals or returns without a camera, and trigger random mock events for testing WebSocket integrations."
+description: "Query the InventoryEngine event log, simulate product removals or returns without a camera, and fire mock events to test WebSocket integrations."
 ---
 
 These endpoints let you query the engine's past event log and inject test events without needing a physical camera or the computer-vision pipeline. Simulated events flow through the same `InventoryEngine.process_event()` path as real detections, triggering stock updates, alert evaluation, and all connected WebSocket broadcasts.

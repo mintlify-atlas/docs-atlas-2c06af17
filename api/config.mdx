@@ -1,7 +1,7 @@
 ---
-title: "Configuration Endpoint: Dynamic Threshold Updates"
+title: "Config Endpoint: Alert Threshold and HTML Dashboard"
 sidebarTitle: "Config"
-description: "The PUT /api/config/threshold endpoint lets you update the stock alert threshold at runtime without restarting the server."
+description: "Update the live alert threshold at runtime without restarting the server, and access the standalone HTML operations dashboard without the React frontend."
 ---
 
 The config endpoint lets operators adjust alert sensitivity live during operation. Changing the threshold immediately re-evaluates every product's `is_alert` flag — there is no need to restart the server or wait for the next detection event.

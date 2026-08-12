@@ -1,5 +1,5 @@
 ---
-title: "Camera Capture: RTSP and USB Frame Acquisition"
+title: "Camera Capture: RTSP and USB Camera Frame Acquisition"
 sidebarTitle: "Camera Capture"
 description: "CameraCapture manages RTSP or USB camera connections, delivers frames to the detection pipeline, and handles auto-reconnection with configurable backoff."
 ---
@@ -27,8 +27,8 @@ Every frame produced by `get_frames()` is wrapped in a `FrameData` dataclass:
 </ResponseField>
 
 <ResponseField name="frame_id" type="int">
-  Monotonically increasing frame counter, reset to 0 when the capture is
-  (re)started.
+  Monotonically increasing frame counter, initialised to `0` when the
+  `CameraCapture` object is constructed. It is not reset on reconnection.
 </ResponseField>
 
 <ResponseField name="resolution" type="tuple[int, int]">

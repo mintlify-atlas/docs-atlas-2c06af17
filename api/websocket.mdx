@@ -252,7 +252,7 @@ Fired after every inventory event. Provides per-slot interaction counts for the 
 Fired when `NarrativeEngine.generate()` produces a new message, subject to a **cooldown of 30 seconds** per SKU/message-type combination. This prevents the frontend from being flooded with repeated messages during rapid removal sequences. The payload is wrapped in a `data` envelope.
 
 <Tip>
-  A single inventory event can trigger **up to two** `narrative` emissions: one for the event itself (retiro/devolución) and one for the predictive narrative if enough history exists.
+  A single inventory event can trigger **up to three** `narrative` emissions: one for the event itself (retiro/devolución), one for the predictive narrative if enough history exists, and one from the alert callback (`_on_inventory_alert`) if the event causes the SKU to cross the low-stock threshold.
 </Tip>
 
 <ResponseField name="data" type="object" required>

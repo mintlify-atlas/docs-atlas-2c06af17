@@ -66,7 +66,7 @@ if time.time() - last_event_time < self.cooldown_seconds:
 After an event is emitted the cooldown timestamp is refreshed and the diff history for that SKU is cleared, resetting the consistency buffer.
 
 <Warning>
-  Increasing `cooldown_seconds` reduces double-counting but also delays detection of rapid consecutive removals. The default of 3 seconds is calibrated for a typical retail pace. Adjust it in `config.py` before deploying in a high-velocity environment.
+  Increasing `cooldown_seconds` reduces double-counting but also delays detection of rapid consecutive removals. The default of 3 seconds is calibrated for a typical retail pace. Adjust it directly in `DetectionEngine.__init__` inside `backend/detection_engine.py` before deploying in a high-velocity environment.
 </Warning>
 
 ### YOLO Warm-Up
@@ -129,15 +129,15 @@ The team workflow defined in `WORKFLOW.md` organises integration into three phas
 
 ## Key Configuration Values
 
-All tunable parameters live in `backend/config.py`:
+Tunable parameters are defined as module-level constants or constructor arguments in their respective source files. There is no separate `config.py`:
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
-| `confidence_threshold` | `0.70` | Minimum YOLO detection confidence accepted by M3 |
-| `cooldown_seconds` | `3.0` | Per-slot cooldown between consecutive events in M2 |
-| `validation_frames` | `3` | Consecutive frames required for M2 consistency check |
-| `alert_threshold` | `0.20` | Fraction of `stock_initial` that triggers an alert in M3 |
-| `prediction_alpha` | `0.3` | Exponential smoothing weight in M6 (higher = more reactive) |
-| `heatmap_window_seconds` | `300` | Sliding window duration for M7 intensity calculation |
-| `narrative_cooldown_seconds` | `30` | Minimum gap between identical narrative message types in M8 |
-| `stock_initial` | `8` | Starting unit count per SKU |
+| Parameter | Default | Defined in | Effect |
+|-----------|---------|-----------|--------|
+| `CONFIDENCE_THRESHOLD` | `0.15` | `backend/inventory_engine.py` | Minimum event confidence accepted by M3; events below this value are discarded |
+| `cooldown_seconds` | `3.0` | `backend/detection_engine.py` | Per-slot cooldown between consecutive events in M2 |
+| `consistency_frames` | `3` | `backend/detection_engine.py` | Consecutive frames with the same directional change required before M2 emits an event |
+| `MIN_THRESHOLD` (`alert_threshold`) | `0.20` | `backend/inventory_engine.py` | Fraction of `stock_initial` at or below which M3 triggers an alert |
+| `alpha` | `0.3` | `backend/main.py` → `PredictionEngine(alpha=0.3)` | Exponential smoothing weight in M6 (higher = more reactive to recent data) |
+| `window_seconds` | `300` | `backend/heatmap_engine.py` | Sliding window duration for M7 intensity calculation |
+| `cooldown_seconds` (narrative) | `30.0` | `backend/main.py` → `NarrativeEngine(cooldown_seconds=30.0)` | Minimum gap between identical narrative message types in M8 |
+| `STOCK_INITIAL` | `8` | `backend/inventory_engine.py` | Starting unit count per SKU |
