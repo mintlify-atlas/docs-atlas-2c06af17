@@ -1,0 +1,97 @@
+---
+title: "Anaquel Inteligente 3B: AI Shelf Monitoring System"
+sidebarTitle: "Introduction"
+description: "Anaquel Inteligente 3B uses YOLOv8 computer vision to monitor retail shelves in real time, detecting product removals and returns without QR codes or RFID."
+---
+
+Anaquel Inteligente 3B is a real-time retail shelf inventory monitoring system built for Tiendas 3B. It uses a YOLOv8-seg computer vision model and a fixed 5-megapixel camera to watch a single shelf continuously, detecting every product removal and return as it happens — no QR codes, no RFID tags, no manual scanning required. The result is a live inventory count that stays synchronized with the physical shelf, surfaced through a React dashboard and pushed to every connected client via Socket.IO WebSockets.
+
+## The Problem
+
+In modern convenience retail, the **theoretical inventory** (derived from POS sales records and scheduled restocking runs) routinely diverges from the **physical inventory** actually sitting on the shelf. Products are removed between scans, returned by customers who change their minds, or simply miscounted. By the time a stockout is noticed, a sale has already been lost. Anaquel Inteligente 3B closes this gap by giving store staff real-time visibility into shelf state at the slot level — enabling proactive restocking before the shelf goes empty.
+
+## Monitored SKUs
+
+The system tracks exactly **7 SKUs**, each assigned a fixed slot on the shelf and an 8-unit starting stock. The YOLO model is trained with polygon-segmentation labels for all seven products:
+
+| Slot | SKU ID | Product Name | Barcode |
+|------|--------|--------------|---------|
+| 1 | `agua_burst` | Agua Natural Burst 1500 ml | 7502261250185 |
+| 2 | `burst_energetica_roja` | Bebida Energetica Red Burst 473 ml | 7502261254411 |
+| 3 | `burst_energy` | Bebida Energetica Original Burst Energy 600 ml | 7502261273047 |
+| 4 | `nachos_naturasol` | Nachos Con Sal Naturasol 200 gr | 7503052023278 |
+| 5 | `nebraska_mango` | Bebida Mango-Durazno Nebraska 460 ml | 7502261273504 |
+| 6 | `sisi_cola` | Refresco Cola Sin Azucar Sisi 355 ml | 7502261272415 |
+| 7 | `sun_paradise_naranja` | Bebida Naranja Sun Paradise 900 ml | 7502261269576 |
+
+## Key Differentiators
+
+Anaquel Inteligente 3B goes well beyond a simple "product present / product missing" detection:
+
+- **No auxiliary hardware.** Detection is performed purely from visual packaging — no QR codes, RFID labels, or weight sensors are required.
+- **Bidirectional inventory.** The system detects both removals (decrements stock) and returns (increments stock), keeping the count accurate when customers put products back on the shelf.
+- **Predictive stockout warnings.** Using exponential smoothing over per-SKU removal timestamps, the engine forecasts how many minutes remain before each SKU hits zero and surfaces this estimate on the dashboard in plain Spanish.
+- **Activity heatmap.** Slot-level interaction counts are normalized and served as a gradient heatmap, giving store managers behavioral insight into which products attract the most attention.
+- **Narrative alerts in Spanish.** The NarrativeEngine generates human-readable status messages — e.g. *"⚠️ Nachos Naturasol alcanzó el umbral crítico (20%). Se recomienda reposición inmediata."* — with severity levels and emoji icons.
+- **Priority-scored restock recommendations.** The `/api/restock` endpoint returns a ranked list of SKUs to restock, sorted by an urgency score that combines current fill rate, sales velocity (iVenta), and predictive trend.
+- **Anti-false-positive pipeline.** Events are only emitted after the same count change persists across 3 consecutive frames **and** a per-slot cooldown of 3 seconds has elapsed, eliminating flickering detections.
+
+## System Modules
+
+The system is divided into nine modules with clearly defined contracts between them:
+
+| Module | Name | Primary File | Role |
+|--------|------|-------------|------|
+| **M1** | Camera Capture | `backend/camera_capture.py` | RTSP/USB frame acquisition with auto-reconnect and backoff |
+| **M2** | Detection Engine | `backend/detection_engine.py` | YOLOv8-seg inference, per-slot count comparison, `DetectionEvent` generation |
+| **M3** | Inventory Engine | `backend/inventory_engine.py` | Stock state machine, business logic, alert thresholds, observer callbacks |
+| **M4** | API Layer | `backend/main.py` | FastAPI REST endpoints + Socket.IO WebSocket server |
+| **M5** | Video Overlay | `backend/video_overlay.py` | Bounding-box annotations, traffic-light colour coding, JPEG/base64 encoding |
+| **M6** | Prediction Engine | `backend/prediction_engine.py` | Exponential-smoothing stockout forecasts per SKU |
+| **M7** | Heatmap Engine | `backend/heatmap_engine.py` | Slot interaction counts normalized within a configurable time window |
+| **M8** | Narrative Engine | `backend/narrative_engine.py` | Spanish-language status message generation with severity and cooldown |
+| **M9** | Dashboard | `frontend/src/` | React + Socket.IO real-time UI with video feed, charts, and alert log |
+
+## Tech Stack
+
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Computer Vision / AI | Ultralytics YOLOv8-seg | 8.3.0 |
+| Backend framework | FastAPI + Uvicorn | 0.115.0 / 0.30.6 |
+| WebSocket | python-socketio | 5.11.4 |
+| Image processing | OpenCV (headless) | 4.10.0.84 |
+| Frontend framework | React + Vite | ^18.3.1 / ^5.3.4 |
+| UI styling | TailwindCSS | ^3.4.6 |
+| Charts | Recharts | ^2.12.7 |
+| Real-time client | socket.io-client | ^4.7.5 |
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Clone the repo, install dependencies, and see live shelf events in under 10 minutes.
+  </Card>
+  <Card
+    title="Architecture"
+    icon="diagram-project"
+    href="/architecture"
+  >
+    Trace the full camera-to-dashboard data flow and understand how modules are decoupled.
+  </Card>
+  <Card
+    title="Detection Engine"
+    icon="eye"
+    href="/backend/detection-engine"
+  >
+    Deep-dive into YOLOv8-seg inference, anti-false-positive logic, and event generation.
+  </Card>
+  <Card
+    title="API Overview"
+    icon="code"
+    href="/api/overview"
+  >
+    Browse every REST endpoint and Socket.IO event emitted by the FastAPI backend.
+  </Card>
+</CardGroup>

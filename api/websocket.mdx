@@ -1,0 +1,372 @@
+---
+title: "WebSocket Events: Real-Time Inventory Stream"
+sidebarTitle: "WebSocket"
+description: "Anaquel Inteligente 3B streams inventory updates, detection events, predictions, heatmaps, narratives, and video frames via Socket.IO on ws://localhost:8000."
+---
+
+The backend is built with **python-socketio** mounted on top of a FastAPI application and served as a combined ASGI app. Clients connect to `http://localhost:8000` using the Socket.IO protocol, which negotiates a **WebSocket** transport with an automatic polling fallback. The server is configured with `cors_allowed_origins="*"`, so any origin may connect during development.
+
+## Connecting to the Server
+
+<CodeGroup>
+
+```typescript TypeScript / JavaScript
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:8000', {
+  transports: ['websocket', 'polling'],
+});
+
+socket.on('connect', () => {
+  console.log('Connected:', socket.id);
+});
+```
+
+```python Python
+import socketio
+
+sio = socketio.Client()
+
+@sio.event
+def connect():
+    print('Connected to server')
+
+sio.connect('http://localhost:8000')
+```
+
+</CodeGroup>
+
+The frontend `useSocket` hook configures `reconnectionAttempts: 5` and `reconnectionDelay: 2000` ms, and falls back to local mock data if the server is not reachable within 3 seconds.
+
+---
+
+## Lifecycle Events
+
+When a client connects or disconnects, the server logs the Socket.IO session ID (`sid`) for diagnostics.
+
+| Event        | Direction       | Server log message                    |
+| ------------ | --------------- | ------------------------------------- |
+| `connect`    | Client → Server | `Cliente conectado: {sid}`            |
+| `disconnect` | Client → Server | `Cliente desconectado: {sid}`         |
+
+---
+
+## Server-Emitted Events
+
+The following events are **broadcast to all connected clients** by `sio.emit()`. Each is emitted from a synchronous callback that safely schedules work onto the running asyncio event loop.
+
+---
+
+### `inventory_update`
+
+Fired after every successful `InventoryEngine.process_event()` call. Carries both the raw inventory event and the updated stock state for the affected SKU — the primary event for keeping the frontend product list in sync.
+
+<ResponseField name="event" type="object" required>
+  The inventory event that triggered the update.
+
+  <Expandable title="InventoryEvent fields">
+    <ResponseField name="event_id" type="string">UUID of the event.</ResponseField>
+    <ResponseField name="event_type" type="string">`"retiro"` or `"devolucion"`.</ResponseField>
+    <ResponseField name="sku_id" type="string">Machine-readable product identifier.</ResponseField>
+    <ResponseField name="sku_name" type="string">Human-readable product name.</ResponseField>
+    <ResponseField name="slot_id" type="integer">Shelf slot number.</ResponseField>
+    <ResponseField name="stock_before" type="integer">Stock count before the event.</ResponseField>
+    <ResponseField name="stock_after" type="integer">Stock count after the event.</ResponseField>
+    <ResponseField name="confidence" type="float">Detection confidence in `[0.0, 1.0]`.</ResponseField>
+    <ResponseField name="timestamp" type="string">ISO 8601 datetime string.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="stock" type="object" required>
+  Full current stock state for the affected SKU.
+
+  <Expandable title="ProductStock fields">
+    <ResponseField name="sku_id" type="string">Machine-readable product identifier.</ResponseField>
+    <ResponseField name="sku_name" type="string">Human-readable product name.</ResponseField>
+    <ResponseField name="slot_id" type="integer">Shelf slot number.</ResponseField>
+    <ResponseField name="stock_initial" type="integer">Initial stock when the session began.</ResponseField>
+    <ResponseField name="stock_current" type="integer">Current stock count.</ResponseField>
+    <ResponseField name="stock_min_threshold" type="float">Fractional alert threshold, e.g. `0.2` means 20% remaining.</ResponseField>
+    <ResponseField name="is_alert" type="boolean">Whether the SKU is currently in an alert state.</ResponseField>
+    <ResponseField name="last_event" type="string | null">ISO 8601 datetime of the last event, or `null`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```json Example payload
+{
+  "event": {
+    "event_id": "uuid",
+    "event_type": "retiro",
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "slot_id": 4,
+    "stock_before": 5,
+    "stock_after": 4,
+    "confidence": 0.95,
+    "timestamp": "2026-03-20T14:32:01.123456"
+  },
+  "stock": {
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "slot_id": 4,
+    "stock_initial": 8,
+    "stock_current": 4,
+    "stock_min_threshold": 0.2,
+    "is_alert": false,
+    "last_event": "2026-03-20T14:32:01.123456"
+  }
+}
+```
+
+---
+
+### `detection_event`
+
+Emitted in the same broadcast batch as `inventory_update`, carrying only the raw `InventoryEvent` object (no accompanying stock state). Useful for components that maintain an event log independently of per-SKU stock.
+
+<ResponseField name="(root)" type="object" required>
+  An `InventoryEvent` object — identical to the `event` key in `inventory_update`. See the field listing above.
+</ResponseField>
+
+```json Example payload
+{
+  "event_id": "uuid",
+  "event_type": "retiro",
+  "sku_id": "nachos_naturasol",
+  "sku_name": "Nachos Con Sal Naturasol 200gr",
+  "slot_id": 4,
+  "stock_before": 5,
+  "stock_after": 4,
+  "confidence": 0.95,
+  "timestamp": "2026-03-20T14:32:01.123456"
+}
+```
+
+---
+
+### `alert`
+
+Fired **only** when `stock_current` crosses below the alert threshold for the first time — i.e., when `is_alert` transitions from `false` to `true`. The payload shape is identical to `inventory_update`.
+
+<Note>
+  `alert` fires once per threshold crossing. If the SKU is already in an alert state when the next removal arrives, **no new `alert` event is emitted** — only `inventory_update` is sent. This prevents duplicate alert toasts in the UI.
+</Note>
+
+<ResponseField name="event" type="object" required>
+  The `InventoryEvent` that caused the threshold to be crossed. Same fields as in `inventory_update`.
+</ResponseField>
+
+<ResponseField name="stock" type="object" required>
+  The `ProductStock` state immediately after the crossing. `is_alert` will be `true`. Same fields as in `inventory_update`.
+</ResponseField>
+
+```json Example payload
+{
+  "event": {
+    "event_id": "uuid",
+    "event_type": "retiro",
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "slot_id": 4,
+    "stock_before": 2,
+    "stock_after": 1,
+    "confidence": 0.92,
+    "timestamp": "2026-03-20T14:45:10.000000"
+  },
+  "stock": {
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "slot_id": 4,
+    "stock_initial": 8,
+    "stock_current": 1,
+    "stock_min_threshold": 0.2,
+    "is_alert": true,
+    "last_event": "2026-03-20T14:45:10.000000"
+  }
+}
+```
+
+---
+
+### `prediction_update`
+
+Fired after every inventory event when **at least two removal events** exist in the SKU's history, giving the `PredictionEngine` enough data to compute a meaningful rate. The payload is wrapped in a `data` envelope.
+
+<ResponseField name="data" type="object" required>
+  A `StockPrediction` object.
+
+  <Expandable title="StockPrediction fields">
+    <ResponseField name="sku_id" type="string">Product identifier.</ResponseField>
+    <ResponseField name="sku_name" type="string">Human-readable product name.</ResponseField>
+    <ResponseField name="stock_current" type="integer">Current stock at prediction time.</ResponseField>
+    <ResponseField name="rate_per_hour" type="float">Exponentially smoothed removal rate (units/hour).</ResponseField>
+    <ResponseField name="estimated_depletion" type="string | null">ISO 8601 datetime when stock is predicted to reach zero, or `null` if the rate is zero.</ResponseField>
+    <ResponseField name="minutes_remaining" type="float | null">Minutes until depletion, or `null`.</ResponseField>
+    <ResponseField name="trend" type="string">`"acelerando"` | `"estable"` | `"desacelerando"`</ResponseField>
+    <ResponseField name="confidence" type="string">`"alta"` | `"media"` | `"baja"` based on sample size.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```json Example payload
+{
+  "data": {
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "stock_current": 4,
+    "rate_per_hour": 12.5,
+    "estimated_depletion": "2026-03-20T15:01:00.000000",
+    "minutes_remaining": 29.0,
+    "trend": "estable",
+    "confidence": "media"
+  }
+}
+```
+
+---
+
+### `heatmap_update`
+
+Fired after every inventory event. Provides per-slot interaction counts for the default time window returned by `HeatmapEngine.get_heatmap()`. Use this to keep a live activity heatmap overlay up to date without polling `/api/heatmap`.
+
+<ResponseField name="data" type="object" required>
+  The result of `HeatmapEngine.get_heatmap()`. Contains per-slot interaction counts and intensity values for the active time window.
+</ResponseField>
+
+```json Example payload
+{
+  "data": {
+    "slots": [
+      { "slot_id": 1, "sku_id": "papas_sabritas", "activity_count": 7, "intensity": 0.87 },
+      { "slot_id": 4, "sku_id": "nachos_naturasol", "activity_count": 3, "intensity": 0.37 }
+    ],
+    "window_seconds": 300,
+    "last_updated": "2026-03-20T14:32:01.123456"
+  }
+}
+```
+
+---
+
+### `narrative`
+
+Fired when `NarrativeEngine.generate()` produces a new message, subject to a **cooldown of 30 seconds** per SKU/message-type combination. This prevents the frontend from being flooded with repeated messages during rapid removal sequences. The payload is wrapped in a `data` envelope.
+
+<Tip>
+  A single inventory event can trigger **up to two** `narrative` emissions: one for the event itself (retiro/devolución) and one for the predictive narrative if enough history exists.
+</Tip>
+
+<ResponseField name="data" type="object" required>
+  A `NarrativeMessage` object.
+
+  <Expandable title="NarrativeMessage fields">
+    <ResponseField name="message_id" type="string">UUID of the message.</ResponseField>
+    <ResponseField name="severity" type="string">`"info"` | `"warning"` | `"critical"`</ResponseField>
+    <ResponseField name="text" type="string">Human-readable Spanish message.</ResponseField>
+    <ResponseField name="sku_id" type="string | null">Related SKU, or `null` for general messages.</ResponseField>
+    <ResponseField name="timestamp" type="string">ISO 8601 datetime string.</ResponseField>
+    <ResponseField name="icon" type="string">Emoji corresponding to the severity level.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```json Example payload
+{
+  "data": {
+    "message_id": "uuid",
+    "severity": "warning",
+    "text": "⚠️ Nachos Con Sal Naturasol 200gr está al 50% de su capacidad.",
+    "sku_id": "nachos_naturasol",
+    "timestamp": "2026-03-20T14:32:01.123456",
+    "icon": "⚠️"
+  }
+}
+```
+
+---
+
+### `video_frame`
+
+Fired for every camera frame processed by the camera pipeline. Frames are encoded as base64 JPEG strings and emitted at up to **5 FPS** (`max_fps=5` in `stream_loop`). Each frame is scaled to **640 px wide** (`stream_width=640`) before encoding to keep bandwidth manageable.
+
+<Warning>
+  This event can produce up to 5 messages per second. Avoid heavy computation in the handler — update an `<img>` `src` attribute directly instead of storing frames in React state.
+</Warning>
+
+<ResponseField name="frame" type="string" required>
+  Base64-encoded JPEG image string. Render it by prefixing with the `data:image/jpeg;base64,` data URI scheme.
+</ResponseField>
+
+```json Example payload
+{
+  "frame": "/9j/4AAQSkZJRgABAQAA..."
+}
+```
+
+**Render in the browser:**
+
+```typescript
+socket.on('video_frame', (data) => {
+  const img = document.getElementById('feed') as HTMLImageElement;
+  img.src = `data:image/jpeg;base64,${data.frame}`;
+});
+```
+
+---
+
+## Full Subscription Example
+
+The following snippet mirrors the logic used in the frontend `useSocket` hook and demonstrates subscribing to all server events in a single setup block.
+
+```typescript
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:8000', {
+  transports: ['websocket', 'polling'],
+  reconnectionAttempts: 5,
+  reconnectionDelay: 2000,
+});
+
+// ── Lifecycle ──────────────────────────────────────────────
+socket.on('connect', () => {
+  console.info('Connected:', socket.id);
+});
+
+socket.on('disconnect', () => {
+  console.warn('Disconnected from backend');
+});
+
+// ── Inventory ──────────────────────────────────────────────
+socket.on('inventory_update', (payload) => {
+  const { event, stock } = payload;
+  console.log(`${event.event_type}: ${stock.sku_name} stock=${stock.stock_current}`);
+});
+
+socket.on('detection_event', (event) => {
+  console.log('Raw detection:', event.event_id, event.event_type);
+});
+
+// ── Alerts ────────────────────────────────────────────────
+socket.on('alert', (payload) => {
+  console.warn(`ALERT: ${payload.stock.sku_name} is below threshold!`);
+});
+
+// ── Intelligence ──────────────────────────────────────────
+socket.on('prediction_update', (payload) => {
+  const pred = payload.data;
+  console.log(`${pred.sku_name}: ~${pred.minutes_remaining} min remaining (${pred.trend})`);
+});
+
+socket.on('heatmap_update', (payload) => {
+  const heatmap = payload.data;
+  console.log(`Heatmap updated: ${heatmap.slots.length} slots`);
+});
+
+socket.on('narrative', (payload) => {
+  const msg = payload.data;
+  console.log(`${msg.icon} [${msg.severity}] ${msg.text}`);
+});
+
+// ── Video ─────────────────────────────────────────────────
+socket.on('video_frame', (payload) => {
+  document.getElementById('feed').src = `data:image/jpeg;base64,${payload.frame}`;
+});
+```

@@ -1,0 +1,195 @@
+---
+title: "Events Endpoints: Detection Events and Simulation"
+sidebarTitle: "Events"
+description: "Endpoints to query the event history, simulate product removals or returns without a camera, and trigger random mock events for testing WebSocket integrations."
+---
+
+These endpoints let you query the engine's past event log and inject test events without needing a physical camera or the computer-vision pipeline. Simulated events flow through the same `InventoryEngine.process_event()` path as real detections, triggering stock updates, alert evaluation, and all connected WebSocket broadcasts.
+
+---
+
+## GET /api/events
+
+Returns the recorded `InventoryEvent` log in reverse chronological order (most recent first). Supports pagination and filtering by SKU.
+
+<ParamField query="limit" type="integer" default="50">
+  Maximum number of events to return. Minimum `1`, maximum `500`.
+</ParamField>
+
+<ParamField query="sku_id" type="string">
+  Optional. When provided, only events whose `sku_id` matches this value are returned. Must be one of the 7 valid SKU IDs.
+</ParamField>
+
+```bash
+curl "http://localhost:8000/api/events?limit=10&sku_id=nachos_naturasol"
+```
+
+### InventoryEvent Object
+
+<ResponseField name="event_id" type="string">
+  UUID v4 uniquely identifying this event.
+</ResponseField>
+
+<ResponseField name="event_type" type="string">
+  Either `"retiro"` (product taken from shelf) or `"devolucion"` (product returned to shelf).
+</ResponseField>
+
+<ResponseField name="sku_id" type="string">
+  Identifier of the affected product.
+</ResponseField>
+
+<ResponseField name="sku_name" type="string">
+  Human-readable name of the affected product.
+</ResponseField>
+
+<ResponseField name="slot_id" type="integer">
+  Physical shelf slot number where the event occurred.
+</ResponseField>
+
+<ResponseField name="stock_before" type="integer">
+  Stock level immediately before this event was applied.
+</ResponseField>
+
+<ResponseField name="stock_after" type="integer">
+  Stock level immediately after this event was applied.
+</ResponseField>
+
+<ResponseField name="confidence" type="float">
+  Detection confidence score (0.0–1.0). Events below `0.15` are discarded by the engine before reaching this log.
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 datetime when the event was detected.
+</ResponseField>
+
+**Example response:**
+
+```json
+[
+  {
+    "event_id": "a3f1c2d4-58e0-4b1a-9f3c-1234567890ab",
+    "event_type": "retiro",
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "slot_id": 4,
+    "stock_before": 6,
+    "stock_after": 5,
+    "confidence": 0.95,
+    "timestamp": "2024-11-15T10:28:41.009123"
+  }
+]
+```
+
+---
+
+## POST /api/events
+
+Injects a simulated detection event directly into the `InventoryEngine` without requiring the camera pipeline. The event is processed identically to a real camera detection.
+
+<ParamField body="sku_id" type="string" required>
+  The SKU to apply the event to. Must be one of the 7 valid SKU IDs. Returns HTTP 404 if not found.
+</ParamField>
+
+<ParamField body="event_type" type="string" required>
+  The type of event to simulate. Must be exactly `"retiro"` or `"devolucion"`.
+</ParamField>
+
+<ParamField body="confidence" type="float" default="0.95">
+  Simulated detection confidence. Range `0.0`–`1.0`. Events below the engine's internal threshold (`0.15`) will be rejected with HTTP 422.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/events \
+  -H 'Content-Type: application/json' \
+  -d '{"sku_id": "nachos_naturasol", "event_type": "retiro"}'
+```
+
+**200 — Success** (returns the created `InventoryEvent`):
+
+```json
+{
+  "event_id": "b7e2f501-1a3c-4d8e-bc90-abcdef012345",
+  "event_type": "retiro",
+  "sku_id": "nachos_naturasol",
+  "sku_name": "Nachos Con Sal Naturasol 200gr",
+  "slot_id": 4,
+  "stock_before": 5,
+  "stock_after": 4,
+  "confidence": 0.95,
+  "timestamp": "2024-11-15T10:35:12.774200"
+}
+```
+
+**404 — SKU not found:**
+
+```json
+{
+  "detail": "SKU 'unknown_sku' no encontrado"
+}
+```
+
+**422 — Event ignored:**
+
+```json
+{
+  "detail": "Evento ignorado (confianza baja o duplicado)"
+}
+```
+
+<Note>
+  This endpoint also broadcasts two Socket.IO events to **all connected WebSocket clients**: `inventory_update` (carrying both the event and updated stock) and `detection_event` (carrying the raw event). Use it to exercise WebSocket integrations without needing the camera pipeline active.
+</Note>
+
+---
+
+## POST /api/mock/event
+
+Fires a random `RETIRO` event against a randomly selected SKU. No request body is required. Designed for quick smoke-testing of WebSocket connections and dashboard integrations.
+
+```bash
+curl -X POST http://localhost:8000/api/mock/event
+```
+
+<ResponseField name="status" type="string">
+  `"ok"` when the event was processed, or `"ignored"` when the randomly selected product has `stock_current = 0`.
+</ResponseField>
+
+<ResponseField name="event" type="object">
+  The `InventoryEvent` that was created (only present when `status` is `"ok"`).
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Explanation string (only present when `status` is `"ignored"`).
+</ResponseField>
+
+**Success response:**
+
+```json
+{
+  "status": "ok",
+  "event": {
+    "event_id": "c9d3e812-2b4f-4e1a-8c01-fedcba987654",
+    "event_type": "retiro",
+    "sku_id": "sisi_cola",
+    "sku_name": "Refresco Cola Sin Azucar Sisi 355ml",
+    "slot_id": 6,
+    "stock_before": 7,
+    "stock_after": 6,
+    "confidence": 0.95,
+    "timestamp": "2024-11-15T10:40:03.551800"
+  }
+}
+```
+
+**Ignored response (stock already at 0):**
+
+```json
+{
+  "status": "ignored",
+  "message": "Evento ignorado (stock en 0 o duplicado)"
+}
+```
+
+<Tip>
+  Call `POST /api/mock/event` in a loop (e.g., `watch -n 2 curl -s -X POST http://localhost:8000/api/mock/event`) to generate a continuous stream of events for live WebSocket or dashboard testing.
+</Tip>

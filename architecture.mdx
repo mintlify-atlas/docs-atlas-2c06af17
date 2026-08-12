@@ -1,0 +1,143 @@
+---
+title: "System Architecture: Camera-to-Dashboard Pipeline"
+sidebarTitle: "Architecture"
+description: "Trace the full data flow from camera frame capture through YOLOv8 detection, inventory state updates, intelligence engines, and real-time WebSocket streaming to the React dashboard."
+---
+
+Anaquel Inteligente 3B is built as a pipeline of nine loosely-coupled modules connected by typed Python dataclasses defined in `backend/contracts.py`. Each module has a single responsibility and communicates with its neighbours through explicit contracts — so any module can be developed and tested in isolation using mocks, and the full system is assembled incrementally. The FastAPI + Socket.IO backend sits at the centre, receiving detection events from the computer vision pipeline and broadcasting state changes to every connected React client over WebSocket.
+
+## Pipeline Overview
+
+```
+Camera → M1 CameraCapture → M2 DetectionEngine → M3 InventoryEngine ──┬── M6 PredictionEngine
+                                     │                                 │
+                                     └── M5 VideoOverlay               ├── M7 HeatmapEngine
+                                                                        │
+                                                                        ├── M8 NarrativeEngine
+                                                                        │
+                                                                        └── M4 FastAPI REST + Socket.IO
+                                                                                    │
+                                                                              M9 React Dashboard
+```
+
+Frames flow left-to-right through M1 and M2. Events and state flow downward from M3 into the intelligence engines (M6, M7, M8) and the API layer (M4). The dashboard (M9) consumes both the REST endpoints and the live Socket.IO stream.
+
+## Module Reference
+
+| Module ID | Name | File | Responsibility |
+|-----------|------|------|----------------|
+| **M1** | Camera Capture | `backend/camera_capture.py` | RTSP/USB frame acquisition, configurable resolution, auto-reconnect with exponential backoff |
+| **M2** | Detection Engine | `backend/detection_engine.py` | YOLOv8-seg inference, per-SKU count comparison across frames, `DetectionEvent` generation |
+| **M3** | Inventory Engine | `backend/inventory_engine.py` | In-memory stock state machine, business logic, configurable alert thresholds, observer callbacks |
+| **M4** | API Layer | `backend/main.py` | FastAPI REST endpoints + Socket.IO WebSocket server, CORS, embedded HTML dashboard |
+| **M5** | Video Overlay | `backend/video_overlay.py` | Bounding-box annotations on frames, traffic-light colour coding, JPEG/base64 encoding for streaming |
+| **M6** | Prediction Engine | `backend/prediction_engine.py` | Per-SKU exponential-smoothing stockout forecasts (`rate_per_hour`, `minutes_remaining`, `trend`) |
+| **M7** | Heatmap Engine | `backend/heatmap_engine.py` | Slot interaction counts normalized within a configurable time window (default: 300 s) |
+| **M8** | Narrative Engine | `backend/narrative_engine.py` | Spanish-language status message generation, severity assignment, 30-second per-type cooldown |
+| **M9** | Dashboard | `frontend/src/` | React 18 + Socket.IO client, Recharts graphs, TailwindCSS styling, real-time inventory UI |
+
+## Anti-False-Positive System
+
+Raw YOLO detections can flicker between frames due to lighting changes, motion blur, or partial occlusion. Decrementing inventory on every single fluctuation would produce a cascade of spurious events. The `DetectionEngine` implements two complementary guards to prevent this.
+
+### 3-Frame Consistency Check
+
+Before emitting any event, the engine verifies that the **same directional change** (removal or return) is present in the last `consistency_frames` comparisons. The relevant logic from `backend/detection_engine.py`:
+
+```python
+# Only emit if change is consistent across N frames
+recent = history[-self.consistency_frames:]
+if not all(d < 0 for d in recent) and not all(d > 0 for d in recent):
+    continue
+```
+
+`consistency_frames` defaults to **3**. A transient flicker that appears for one or two frames and then reverts will never produce a `DetectionEvent` because the sign of `diff` will not be uniform across all elements of `recent`.
+
+### Per-Slot Cooldown
+
+Even after consistency is confirmed, the engine enforces a per-slot cooldown window. If a `DetectionEvent` has already been emitted for a given slot, no further event from that slot can be emitted until `cooldown_seconds` (default **3.0 s**) have elapsed:
+
+```python
+last_event_time = self._cooldown.get(slot_id, 0)
+if time.time() - last_event_time < self.cooldown_seconds:
+    continue
+```
+
+After an event is emitted the cooldown timestamp is refreshed and the diff history for that SKU is cleared, resetting the consistency buffer.
+
+<Warning>
+  Increasing `cooldown_seconds` reduces double-counting but also delays detection of rapid consecutive removals. The default of 3 seconds is calibrated for a typical retail pace. Adjust it in `config.py` before deploying in a high-velocity environment.
+</Warning>
+
+### YOLO Warm-Up
+
+On initialization `DetectionEngine.__init__` runs **3 dummy inferences** on a blank 640×640 numpy array before processing any real video. This pre-warms the model weights and any underlying CUDA/CPU kernels so the first live frame is processed at full speed:
+
+```python
+dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+for _ in range(3):
+    self.model.predict(dummy, conf=self.conf, imgsz=self.imgsz, verbose=False)
+```
+
+## Observer Pattern: Decoupling M4, M6, M7, M8 from M3
+
+`InventoryEngine` (M3) exposes two registration methods — `on_event` and `on_alert` — that accept synchronous callbacks. Any module that needs to react to inventory changes registers itself at startup; M3 never imports or directly references M4, M6, M7, or M8.
+
+In `backend/main.py` the four callbacks are wired at module load time:
+
+```python
+engine.on_event(_on_inventory_event)   # → M6 predict, M7 heatmap, M8 narrative, WS broadcast
+engine.on_alert(_on_inventory_alert)   # → M8 alert narrative, WS broadcast
+engine.on_event(_on_ws_event)          # → Socket.IO inventory_update + detection_event
+engine.on_alert(_on_ws_alert)          # → Socket.IO alert
+```
+
+This means:
+- **M6** (PredictionEngine) recalculates stockout forecasts immediately after every event, without M3 knowing anything about predictions.
+- **M7** (HeatmapEngine) records an `InteractionEvent` for the affected slot on every event.
+- **M8** (NarrativeEngine) generates a Spanish-language message and enforces its own 30-second cooldown per message type.
+- **M4** pushes all of the above to connected WebSocket clients by scheduling async coroutines from the synchronous callback context.
+
+## Data Flow: Single Product Removal Event
+
+The following sequence traces what happens from the moment a customer picks up a product to the moment the dashboard updates:
+
+1. **M1 → M2:** `CameraCapture.stream_loop` captures a frame (≤ 5 FPS by default) and passes it to `DetectionEngine.detect()`.
+2. **M2 inference:** `DetectionEngine.detect()` runs YOLOv8-seg and builds a `DetectionResult` with per-SKU counts and a list of `SlotDetection` objects.
+3. **M2 comparison:** `DetectionEngine.compare(prev, curr)` calculates the diff for each SKU, appends it to the diff history, and checks the 3-frame consistency condition and per-slot cooldown.
+4. **M2 → M3:** If both guards pass, a `DetectionEvent` (type `RETIRO` or `DEVOLUCION`) is emitted and passed to `InventoryEngine.process_event()` via the `_camera_callback`.
+5. **M3 state update:** `InventoryEngine` decrements (or increments) the SKU's `stock_current`, checks whether the new value crosses the alert threshold, and appends an `InventoryEvent` to the event log.
+6. **M3 → M8 → WS:** The `_on_inventory_event` callback fires. M8 generates a narrative message (e.g. *"Nachos Naturasol retirado del slot 4. Stock: 7"*) and `_schedule_broadcast` pushes a `narrative` Socket.IO event to all clients.
+7. **M3 → M7 → WS:** An `InteractionEvent` is recorded in M7 and a `heatmap_update` Socket.IO event is broadcast.
+8. **M3 → M6 → WS:** If the SKU has ≥ 2 removal timestamps, `PredictionEngine.predict()` recalculates the exponential-smoothed rate and a `prediction_update` Socket.IO event is broadcast.
+9. **M3 → M4 → WS:** The `_on_ws_event` callback broadcasts an `inventory_update` event carrying both the `InventoryEvent` and the updated `ProductStock` to all connected clients.
+10. **M9 dashboard:** React components subscribed to the Socket.IO events update stock cards, the narrative log, the prediction panel, and the heatmap tile simultaneously — no page reload required.
+
+## Integration Phases
+
+The team workflow defined in `WORKFLOW.md` organises integration into three phases to let five people work in parallel from the start:
+
+| Phase | Name | Description |
+|-------|------|-------------|
+| **Phase 1** | Independent development with mocks | Each module is built against the typed contracts in `contracts.py` using mock data. No cross-module dependencies are needed. |
+| **Phase 2** | Pair integration | Modules are connected in dependency order: M1+M2 → M2+M3 → M3+M4/M6/M7/M8 → M4+M9. Each pair integration is validated before the next begins. |
+| **Phase 3** | Full end-to-end + polish | The complete camera-to-dashboard pipeline runs live. Confidence thresholds, cooldown values, and UI animations are tuned for the demo. |
+
+<Tip>
+  If you are developing a single module, use the mock contracts defined in `mvp-requisitos-y-dependencias.md` to simulate data from upstream modules. The rule is: **no module should ever block on another module being ready**.
+</Tip>
+
+## Key Configuration Values
+
+All tunable parameters live in `backend/config.py`:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `confidence_threshold` | `0.70` | Minimum YOLO detection confidence accepted by M3 |
+| `cooldown_seconds` | `3.0` | Per-slot cooldown between consecutive events in M2 |
+| `validation_frames` | `3` | Consecutive frames required for M2 consistency check |
+| `alert_threshold` | `0.20` | Fraction of `stock_initial` that triggers an alert in M3 |
+| `prediction_alpha` | `0.3` | Exponential smoothing weight in M6 (higher = more reactive) |
+| `heatmap_window_seconds` | `300` | Sliding window duration for M7 intensity calculation |
+| `narrative_cooldown_seconds` | `30` | Minimum gap between identical narrative message types in M8 |
+| `stock_initial` | `8` | Starting unit count per SKU |

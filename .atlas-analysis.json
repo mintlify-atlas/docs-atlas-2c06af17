@@ -1,0 +1,127 @@
+{
+  "projectType": "saas",
+  "projectName": "Anaquel Inteligente 3B",
+  "projectDescription": "A real-time shelf inventory monitoring system for Tiendas 3B that uses YOLOv8 computer vision to detect product removals and returns from a physical shelf, updates inventory automatically, and streams analytics to a React dashboard via WebSocket.",
+  "theme": "luma",
+  "primaryColor": "#38bdf8",
+  "lightColor": "#e0f2fe",
+  "darkColor": "#0f172a",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Backend",
+            "pages": [
+              "backend/detection-engine",
+              "backend/inventory-engine",
+              "backend/intelligence-engines",
+              "backend/camera-capture"
+            ]
+          },
+          {
+            "group": "Frontend",
+            "pages": [
+              "frontend/overview",
+              "frontend/websocket-integration",
+              "frontend/pages"
+            ]
+          },
+          {
+            "group": "Configuration & Deployment",
+            "pages": [
+              "configuration",
+              "deployment"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "REST Endpoints",
+            "pages": [
+              "api/overview",
+              "api/inventory",
+              "api/events",
+              "api/analytics",
+              "api/intelligence",
+              "api/config"
+            ]
+          },
+          {
+            "group": "WebSocket Events",
+            "pages": [
+              "api/websocket"
+            ]
+          },
+          {
+            "group": "Data Contracts",
+            "pages": [
+              "api/contracts"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "YOLOv8-seg computer vision model trained on 7 real store products",
+    "Real-time product removal and return detection from RTSP or USB camera feed",
+    "Automatic inventory decrement/increment with anti-false-positive cooldown and 3-frame consistency check",
+    "Exponential smoothing depletion prediction (minutes until stockout per SKU)",
+    "Slot-based activity heatmap aggregated over a configurable time window",
+    "Intelligent narrative engine generating Spanish-language status messages",
+    "FastAPI + Socket.IO backend broadcasting live updates to React dashboard",
+    "Annotated live video overlay with bounding boxes and traffic-light stock indicators",
+    "Priority-scored restock recommendations combining fill rate and sales velocity (iventa)",
+    "Configurable alert threshold via hot-reload API endpoint"
+  ],
+  "publicApiSurface": [
+    "GET /api/health",
+    "GET /api/inventory",
+    "GET /api/inventory/{sku_id}",
+    "GET /api/events",
+    "POST /api/events (simulate detection event)",
+    "POST /api/mock/event",
+    "GET /api/predictions",
+    "GET /api/heatmap",
+    "GET /api/narratives",
+    "GET /api/analytics",
+    "GET /api/restock",
+    "POST /api/inventory/reset",
+    "PUT /api/config/threshold",
+    "GET /dashboard (embedded HTML dashboard)",
+    "WebSocket event: inventory_update",
+    "WebSocket event: detection_event",
+    "WebSocket event: alert",
+    "WebSocket event: prediction_update",
+    "WebSocket event: heatmap_update",
+    "WebSocket event: narrative",
+    "WebSocket event: video_frame",
+    "DetectionEngine.detect(frame) -> DetectionResult",
+    "DetectionEngine.compare(prev, curr) -> list[DetectionEvent]",
+    "InventoryEngine.process_event(detection) -> InventoryEvent | None",
+    "InventoryEngine.get_state() -> InventoryState",
+    "InventoryEngine.get_analytics() -> dict",
+    "InventoryEngine.get_restock() -> list[dict]",
+    "InventoryEngine.reset()",
+    "InventoryEngine.set_threshold(threshold)",
+    "PredictionEngine.predict(history) -> StockPrediction",
+    "PredictionEngine.predict_all(histories) -> list[StockPrediction]",
+    "HeatmapEngine.record(event)",
+    "HeatmapEngine.get_heatmap(window_seconds) -> dict",
+    "NarrativeEngine.generate(event_type, **kwargs) -> NarrativeMessage | None",
+    "NarrativeEngine.get_recent(limit) -> list[NarrativeMessage]"
+  ]
+}

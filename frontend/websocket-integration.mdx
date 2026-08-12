@@ -1,0 +1,334 @@
+---
+title: "WebSocket Integration with useSocket Hook"
+sidebarTitle: "WebSocket Integration"
+description: "The useSocket React hook manages the Socket.IO connection, handles reconnection, and exposes live inventory, predictions, heatmap, narrative, and video frame state."
+---
+
+`useSocket` is the central data hub for all real-time updates in the Anaquel Inteligente 3B dashboard. Defined in `src/hooks/useSocket.ts`, it creates a single Socket.IO connection to the FastAPI backend, registers handlers for every server-emitted event, and returns a unified `SocketState` object that every page component consumes via React Context. On startup the hook immediately seeds state with mock data, attempts to connect, and switches to live data as soon as the backend responds — providing a seamless fallback without additional configuration.
+
+## Hook Signature
+
+`useSocket` takes no arguments and returns the full `SocketState` object:
+
+```ts
+export function useSocket(): SocketState
+```
+
+The hook is instantiated once at the top of the component tree inside `App.tsx` and its return value is published via `SocketContext`:
+
+```tsx
+// src/App.tsx
+function App() {
+  const socketState = useSocket();
+
+  return (
+    <SocketContext.Provider value={socketState}>
+      <BrowserRouter>
+        <AppInner />
+      </BrowserRouter>
+    </SocketContext.Provider>
+  );
+}
+```
+
+Any component that needs live data calls `useSocketContext()` instead of `useSocket()` directly — this avoids creating multiple connections.
+
+## SocketState Shape
+
+```ts
+export interface SocketState {
+  connected: boolean;          // true when the Socket.IO connection is established
+  products: ProductStock[];    // current stock level per SKU, updated on inventory_update / alert
+  events: DetectionEvent[];    // rolling buffer of up to 100 detection events
+  predictions: StockPrediction[]; // depletion predictions per SKU, upserted on prediction_update
+  heatmap: HeatmapData | null; // latest heatmap snapshot, replaced on heatmap_update
+  narratives: NarrativeMessage[]; // rolling buffer of up to 50 narrative messages
+  alerts: AlertMessage[];      // rolling buffer of up to 50 alert messages
+  videoFrame: string | null;   // most recent base64 JPEG frame string
+  usingMock: boolean;          // true when serving data from mockData.ts instead of the backend
+  cameras: CameraSource[];     // camera list from StoreConfig (seeded from MOCK_STORE)
+  storeName: string;           // store display name
+}
+```
+
+## Connection Configuration
+
+The socket connects to `http://localhost:8000` using WebSocket transport with a polling fallback. Reconnection is handled automatically by Socket.IO:
+
+```ts
+const BACKEND_URL = "http://localhost:8000";
+const CONNECT_TIMEOUT_MS = 3_000;
+
+const socket = io(BACKEND_URL, {
+  transports: ["websocket", "polling"],
+  reconnectionAttempts: 5,
+  reconnectionDelay: 2000,
+  timeout: CONNECT_TIMEOUT_MS,
+});
+```
+
+If the socket does not establish a connection within 3 seconds, the hook logs a warning and keeps `usingMock: true` so the UI continues rendering with mock fixtures.
+
+## Connection Status Tracking
+
+The `connected` boolean in `SocketState` is updated through Socket.IO lifecycle events:
+
+```ts
+socket.on("connect", () => {
+  setState((prev) => ({ ...prev, connected: true, usingMock: false }));
+  fetchInitialState(); // hydrates state via REST before WS events arrive
+});
+
+socket.on("disconnect", () => {
+  setState((prev) => ({ ...prev, connected: false }));
+});
+
+socket.on("connect_error", () => {
+  console.warn("[useSocket] Error de conexión");
+});
+```
+
+On `connect`, the hook also calls `fetchInitialState()`, which fetches the current snapshot from five REST endpoints in parallel before any incremental WS events arrive:
+
+```ts
+const [invRes, predRes, hmRes, narrRes, evtRes] = await Promise.all([
+  fetch(`${BACKEND_URL}/api/inventory`),
+  fetch(`${BACKEND_URL}/api/predictions`),
+  fetch(`${BACKEND_URL}/api/heatmap`),
+  fetch(`${BACKEND_URL}/api/narratives?limit=50`),
+  fetch(`${BACKEND_URL}/api/events?limit=50`),
+]);
+```
+
+<Note>
+  If the REST hydration fails (e.g., the endpoint is temporarily unavailable), the hook catches the error and retains the existing mock data silently — the WS event handlers will gradually replace it as live events arrive.
+</Note>
+
+## Socket.IO Events
+
+The hook subscribes to seven server-emitted events:
+
+### `inventory_update`
+
+Payload: `{ event?: unknown; stock?: Record<string, unknown> }`
+
+Updates the matching product in `products[]`. If the SKU does not yet exist in the array it is appended. The raw backend object is normalized through the `adaptProduct()` adapter before being stored:
+
+```ts
+socket.on("inventory_update", (data) => {
+  if (data.stock) {
+    const adapted = adaptProduct(data.stock);
+    setState((prev) => {
+      const exists = prev.products.some((p) => p.sku_id === adapted.sku_id);
+      const updated = prev.products.map((p) =>
+        p.sku_id === adapted.sku_id ? { ...p, ...adapted } : p
+      );
+      return {
+        ...prev,
+        products: exists ? updated : [...prev.products, adapted],
+      };
+    });
+  }
+});
+```
+
+### `detection_event`
+
+Payload: `DetectionEvent`
+
+Prepends the new event to `events[]`. The buffer is capped at 100 entries (`MAX_EVENTS`):
+
+```ts
+socket.on("detection_event", (data: DetectionEvent) => {
+  setState((prev) => ({
+    ...prev,
+    events: [data, ...prev.events].slice(0, MAX_EVENTS),
+  }));
+});
+```
+
+### `alert`
+
+Payload: `AlertMessage | { event?: unknown; stock?: Record<string, unknown> }`
+
+Marks the affected product's `alert_active` flag and prepends the alert to `alerts[]` (capped at 50):
+
+```ts
+socket.on("alert", (data) => {
+  setState((prev) => {
+    const stockRaw = (data as { stock?: Record<string, unknown> }).stock;
+    let products = prev.products;
+    if (stockRaw) {
+      const adapted = adaptProduct(stockRaw);
+      products = prev.products.map((p) =>
+        p.sku_id === adapted.sku_id
+          ? { ...p, ...adapted, alert_active: true }
+          : p
+      );
+    }
+    return {
+      ...prev,
+      products,
+      alerts: [data as AlertMessage, ...prev.alerts].slice(0, 50),
+    };
+  });
+});
+```
+
+### `prediction_update`
+
+Payload: `{ data: StockPrediction }`
+
+Upserts the prediction for the matching SKU in `predictions[]`:
+
+```ts
+socket.on("prediction_update", (data: { data: StockPrediction }) => {
+  if (data.data) {
+    setState((prev) => {
+      const idx = prev.predictions.findIndex((p) => p.sku_id === data.data.sku_id);
+      const updated = [...prev.predictions];
+      if (idx >= 0) {
+        updated[idx] = data.data;
+      } else {
+        updated.push(data.data);
+      }
+      return { ...prev, predictions: updated };
+    });
+  }
+});
+```
+
+### `heatmap_update`
+
+Payload: `{ data: HeatmapData }`
+
+Replaces the entire `heatmap` snapshot:
+
+```ts
+socket.on("heatmap_update", (data: { data: HeatmapData }) => {
+  if (data.data) {
+    setState((prev) => ({ ...prev, heatmap: data.data }));
+  }
+});
+```
+
+### `narrative`
+
+Payload: `{ data: NarrativeMessage }`
+
+Prepends the new message to `narratives[]`. The buffer is capped at 50 entries (`MAX_NARRATIVES`):
+
+```ts
+socket.on("narrative", (data: { data: NarrativeMessage }) => {
+  if (data.data) {
+    setState((prev) => ({
+      ...prev,
+      narratives: [data.data, ...prev.narratives].slice(0, MAX_NARRATIVES),
+    }));
+  }
+});
+```
+
+### `video_frame`
+
+Payload: `{ frame: string }` — a raw base64-encoded JPEG string (no `data:` prefix)
+
+Replaces `videoFrame` with the latest frame. The `VideoFeed` component constructs the full data URI before passing it to the `<img>` tag:
+
+```ts
+socket.on("video_frame", (data: { frame: string }) => {
+  setState((prev) => ({ ...prev, videoFrame: data.frame }));
+});
+```
+
+## Using the Hook in a Component
+
+Pages consume the shared socket state through `useSocketContext()`:
+
+```tsx
+import { useSocketContext } from '../hooks/useSocket';
+
+function LivePanel() {
+  const {
+    products,
+    predictions,
+    narratives,
+    videoFrame,
+    connected,
+    usingMock,
+  } = useSocketContext();
+
+  // products       → current stock per SKU
+  // predictions    → estimated depletion times
+  // narratives     → human-readable system messages
+  // videoFrame     → latest base64 JPEG from video_frame event
+  // connected      → true when Socket.IO is connected
+  // usingMock      → true when serving mock data
+}
+```
+
+<Warning>
+  Call `useSocketContext()` (not `useSocket()`) inside page and component files. Calling `useSocket()` outside of `App` would create a second Socket.IO connection to the backend.
+</Warning>
+
+## TypeScript Interfaces
+
+All types are declared in `src/types/index.ts`. The most important interfaces for WebSocket consumers are:
+
+```ts
+// Represents the real-time stock state of one product SKU
+export interface ProductStock {
+  sku_id: string;
+  sku_name: string;
+  stock_current: number;
+  stock_initial: number;
+  last_event: string | null;
+  alert_active: boolean;
+  alert_level: "normal" | "low" | "critical";
+  source_id: string;
+}
+
+// A single pick/return event emitted by the YOLOv8 pipeline
+export interface DetectionEvent {
+  event_id: string;
+  sku_id: string;
+  sku_name: string;
+  action: "removed" | "returned";
+  stock_before: number;
+  stock_after: number;
+  timestamp: string;
+  source_id: string;
+}
+
+// ML-generated depletion forecast for one SKU
+export interface StockPrediction {
+  sku_id: string;
+  sku_name: string;
+  stock_current: number;
+  rate_per_hour: number;
+  estimated_depletion: string | null;
+  minutes_remaining: number | null;
+  trend: "acelerando" | "estable" | "desacelerando";
+  confidence: "alta" | "media" | "baja";
+  source_id: string;
+}
+
+// A human-readable narrative generated by the backend for an event or alert
+export interface NarrativeMessage {
+  message_id: string;
+  severity: "info" | "warning" | "critical";
+  text: string;
+  sku_id: string | null;
+  timestamp: string;
+  icon: string;
+  source_id: string;
+}
+
+// One cell in the shelf activity heatmap
+export interface HeatmapSlot {
+  slot_id: number;
+  sku_id: string;
+  activity_count: number;
+  intensity: number; // 0.0–1.0 normalized activity
+}
+```

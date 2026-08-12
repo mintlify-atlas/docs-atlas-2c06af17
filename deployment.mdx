@@ -1,0 +1,279 @@
+---
+title: "Deploy Anaquel Inteligente 3B for Production"
+sidebarTitle: "Deployment"
+description: "Step-by-step guide to deploying Anaquel Inteligente 3B backend and React dashboard for a production or demo environment, including camera setup and model warm-up."
+---
+
+Anaquel Inteligente 3B is designed for **local or intranet deployment** where the camera and the server machine share the same network. The backend is a single Python process that streams video, runs YOLOv8 inference, and serves both a REST API and a Socket.IO WebSocket — all on port 8000. The React dashboard can be served as a Vite dev server on port 3000, or built into a static bundle and hosted anywhere.
+
+---
+
+## Requirements
+
+Before installing, verify that your environment meets the following prerequisites:
+
+- **Python 3.10 or later** (3.11 recommended)
+- **Node.js 18 or later** (for the React frontend)
+- **Camera:** USB webcam (device index `0` or `1`) or an IP camera with a valid RTSP URL
+- **RAM:** 4 GB minimum; 8 GB recommended when running YOLO inference continuously
+- **CPU:** AVX2 instruction support required by PyTorch / YOLOv8
+- **GPU:** Optional — YOLOv8 via Ultralytics will automatically use CUDA if a compatible NVIDIA GPU and driver are present; falls back to CPU otherwise
+
+<Note>
+The backend dependencies include `opencv-python-headless`, which does not require a display server. The system can run on a headless server and stream video to remote dashboard clients.
+</Note>
+
+---
+
+## Installation
+
+<Steps>
+
+### Clone the repository
+
+```bash
+git clone https://github.com/elzackarias/Hackaton3B-Reto1.git
+cd Hackaton3B-Reto1
+```
+
+### Install backend Python dependencies
+
+Create and activate a virtual environment, then install from `requirements.txt`:
+
+<CodeGroup>
+
+```bash macOS / Linux
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+```powershell Windows
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+</CodeGroup>
+
+The `requirements.txt` installs:
+
+| Package | Version | Purpose |
+|---|---|---|
+| `fastapi` | 0.115.0 | REST API framework |
+| `uvicorn[standard]` | 0.30.6 | ASGI server |
+| `python-socketio` | 5.11.4 | WebSocket (Socket.IO) |
+| `ultralytics` | 8.3.0 | YOLOv8 model loading and inference |
+| `opencv-python-headless` | 4.10.0.84 | Frame capture and image processing |
+| `numpy` | &gt;=1.26, &lt;2.0 | Array operations |
+| `pydantic` | &gt;=2.0, &lt;3.0 | Data validation |
+| `aiofiles` | 24.1.0 | Async file I/O |
+
+### Install frontend Node.js dependencies
+
+```bash
+cd frontend
+npm install
+```
+
+### Verify the YOLOv8 model file
+
+The detection engine expects the trained model at:
+
+```
+models/best3.pt
+```
+
+relative to the repository root. Verify it exists:
+
+```bash
+ls models/best3.pt
+```
+
+If the file is missing, obtain it from your team (it is the output of training with `backend/dataset.yaml`) or retrain using:
+
+```bash
+python backend/train_model.py
+```
+
+<Warning>
+The backend will fail to start if `models/best3.pt` is absent. This is the first thing to confirm before launching the server.
+</Warning>
+
+</Steps>
+
+---
+
+## Starting the System
+
+### Using the Setup Scripts
+
+The repository ships with convenience scripts that install all dependencies in a single step:
+
+<CodeGroup>
+
+```bash macOS / Linux
+# From the repository root:
+./scripts/setup-all.sh
+```
+
+```powershell Windows
+# From the repository root:
+.\scripts\setup-all.ps1
+```
+
+</CodeGroup>
+
+### Starting the Backend
+
+<CodeGroup>
+
+```bash macOS / Linux
+cd backend
+source .venv/bin/activate
+uvicorn main:combined_app --host 0.0.0.0 --port 8000
+```
+
+```powershell Windows
+cd backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:combined_app --host 0.0.0.0 --port 8000
+```
+
+</CodeGroup>
+
+On startup the `DetectionEngine` performs three dummy warm-up inferences so the first real frame is processed without latency spikes.
+
+### Starting the Frontend
+
+<CodeGroup>
+
+```bash Development server
+cd frontend
+npm run dev
+# Dashboard available at http://localhost:3000
+```
+
+```bash Production build
+cd frontend
+npm run build
+npm run preview
+```
+
+</CodeGroup>
+
+<Tip>
+The frontend gracefully falls back to built-in mock data if it cannot connect to the backend within 3 seconds. You can demo the UI without a running backend for presentation purposes.
+</Tip>
+
+---
+
+## Camera Setup
+
+### USB Webcam
+
+The default `CameraCapture()` constructor uses an RTSP URL as the primary source and automatically falls back to USB device `0` if the RTSP connection fails. To use a USB camera directly, pass the device index when instantiating `CameraCapture` in your code:
+
+```python
+cam = CameraCapture(source=0)   # first USB webcam
+cam = CameraCapture(source=1)   # second USB webcam
+```
+
+### RTSP IP Camera
+
+Provide a full RTSP URL as the source string:
+
+```python
+cam = CameraCapture(source="rtsp://user:password@192.168.1.100:554/cam/realmonitor?channel=1&subtype=0")
+```
+
+The capture module opens RTSP streams via `cv2.CAP_FFMPEG` with a TCP transport and a 5-second open/read timeout. It retries up to 5 times before falling back to USB.
+
+### Testing Camera Access
+
+Before launching the full server, confirm the camera is accessible:
+
+```bash
+python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera open:', cap.isOpened()); cap.release()"
+```
+
+Expected output: `Camera open: True`. If it prints `False`, try device index `1` or `2`, or check USB connection and driver installation.
+
+<Tip>
+On Linux, camera devices appear as `/dev/video0`, `/dev/video1`, etc. Run `ls /dev/video*` to list available devices, then map them to integer indices (0 → `/dev/video0`).
+</Tip>
+
+---
+
+## Demo Checklist
+
+Use this checklist to verify the end-to-end system is fully functional before a live demonstration:
+
+- [ ] Camera connected and streaming live video to the dashboard
+- [ ] YOLOv8 detecting all 7 products on the shelf (`agua_burst`, `burst_energetica_roja`, `burst_energy`, `nachos_naturasol`, `nebraska_mango`, `sisi_cola`, `sun_paradise_naranja`)
+- [ ] Dashboard showing real-time stock counts per SKU
+- [ ] Product removal triggers automatic stock count decrement visible on the dashboard
+- [ ] Alerts appear when a SKU's stock drops below 25 % of initial stock (`MIN_THRESHOLD = 0.20`)
+- [ ] Prediction panel shows estimated time to stockout (requires ≥ 2 removal events per SKU)
+- [ ] Heatmap panel highlights active shelf slots
+- [ ] Narrative messages (in Spanish) appearing in the dashboard feed
+- [ ] Video overlay with bounding boxes and stock-level colour coding (green / yellow / red) visible on the live feed panel
+
+---
+
+## Ports & Endpoints Summary
+
+| Service | Port | URL | Notes |
+|---|---|---|---|
+| Backend API | 8000 | `http://localhost:8000` | FastAPI + Socket.IO combined ASGI app |
+| API Docs (Swagger) | 8000 | `http://localhost:8000/docs` | Auto-generated interactive API documentation |
+| Embedded Dashboard | 8000 | `http://localhost:8000/dashboard` | Minimal HTML dashboard served directly by FastAPI |
+| Frontend Dev Server | 3000 | `http://localhost:3000` | React + Vite development server |
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+
+<Accordion title="Camera not detected — VideoCapture returns False">
+1. Confirm the USB cable is securely connected and the camera powers on.
+2. Run the quick test: `python -c "import cv2; cap = cv2.VideoCapture(0); print(cap.isOpened())"`. Try indices `0`, `1`, and `2` if the first fails.
+3. On Linux, ensure your user is in the `video` group: `sudo usermod -aG video $USER` (log out and back in).
+4. On Windows, check Device Manager to confirm the camera driver is installed and the device is not in an error state.
+5. If using an RTSP camera, verify the URL, credentials, and that the camera is on the same network. Use VLC (`Media > Open Network Stream`) to test the RTSP URL independently.
+</Accordion>
+
+<Accordion title="YOLOv8 model not found — FileNotFoundError on startup">
+1. Confirm `models/best3.pt` exists at the repository root: `ls models/best3.pt`.
+2. If missing, obtain the trained weights from your team or retrain: `python backend/train_model.py`. Training requires the dataset described in `backend/dataset.yaml`.
+3. Do not rename the file — the path is hardcoded in `detection_engine.py` as `ROOT / "models" / "best3.pt"`.
+4. If you have a different model file, update the `MODEL_PATH` constant in `detection_engine.py` before starting.
+</Accordion>
+
+<Accordion title="Frontend can't connect to backend — dashboard shows mock data">
+1. Confirm the backend is running: `curl http://localhost:8000/api/health` should return `{"status":"ok",...}`.
+2. Check that the backend is bound to `0.0.0.0` (not `127.0.0.1`) if the frontend runs on a different machine.
+3. Open browser developer tools (F12 → Console) and look for WebSocket or CORS errors.
+4. Verify `BACKEND_URL` in `frontend/src/hooks/useSocket.ts` matches the backend's actual address and port.
+5. In production, update `allow_origins` in `main.py`'s `CORSMiddleware` and `cors_allowed_origins` in the `socketio.AsyncServer` call to include your frontend's exact origin.
+</Accordion>
+
+<Accordion title="False positives or double-decrement events">
+1. Increase the YOLO confidence threshold by editing `conf` in `DetectionEngine.__init__` (default `0.1`). Try `0.3` or `0.4`.
+2. Increase `cooldown_seconds` on the `DetectionEngine` instance (default `3.0`). A value of `5.0`–`10.0` suppresses repeated events from the same shelf slot.
+3. Increase `consistency_frames` (default `3`) to require more consecutive frames of agreement before an event is emitted. Try `5`.
+4. If removal events fire twice per product pick, the `consistency_frames` anti-flicker filter may not be catching the oscillation fast enough — increase both `cooldown_seconds` and `consistency_frames` together.
+</Accordion>
+
+<Accordion title="Slow inference — high latency or low effective FPS">
+1. Reduce `imgsz` from `640` to `416` or `320` in the `DetectionEngine` constructor. Smaller images run significantly faster at a slight accuracy cost.
+2. Set `detect_every=3` or `detect_every=4` in the `stream_loop` call in `_run_camera_loop` (default is `2`) to run YOLO on fewer frames.
+3. If a CUDA-capable GPU is available, ensure the correct CUDA toolkit and PyTorch GPU build are installed. Ultralytics will use `cuda:0` automatically when available.
+4. Reduce `max_fps` in the `stream_loop` call if you only need a slower update rate (e.g., `max_fps=2`).
+5. On CPU-only machines, consider using a smaller YOLOv8 variant (`yolov8n` nano) for retraining if latency is critical.
+</Accordion>
+
+</AccordionGroup>

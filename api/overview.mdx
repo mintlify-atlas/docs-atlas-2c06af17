@@ -1,0 +1,73 @@
+---
+title: "REST API Reference: Anaquel Inteligente 3B"
+sidebarTitle: "Overview"
+description: "Complete reference for all REST endpoints in Anaquel Inteligente 3B. Built with FastAPI, interactive docs available at /docs and /redoc."
+---
+
+The Anaquel Inteligente 3B API is a FastAPI application served at port 8000. It exposes the real-time shelf inventory state, event history, analytics, and intelligence modules (predictions, heatmap, narratives) via standard HTTP endpoints, complemented by a Socket.IO WebSocket layer for live push updates. Full interactive documentation — generated automatically by FastAPI — is available at [http://localhost:8000/docs](http://localhost:8000/docs) (Swagger UI) and [http://localhost:8000/redoc](http://localhost:8000/redoc) (ReDoc).
+
+## Base URL
+
+```
+http://localhost:8000
+```
+
+## Authentication
+
+No authentication is required in the current implementation. The server runs in **development mode** with CORS fully open (`allow_origins=["*"]`), accepting requests from any origin.
+
+## Content-Type
+
+All `POST` and `PUT` requests must include the header:
+
+```
+Content-Type: application/json
+```
+
+Responses are always `application/json` unless otherwise noted (the `/dashboard` endpoint returns `text/html`).
+
+## Interactive Documentation
+
+| Interface | URL |
+|---|---|
+| Swagger UI | [http://localhost:8000/docs](http://localhost:8000/docs) |
+| ReDoc | [http://localhost:8000/redoc](http://localhost:8000/redoc) |
+
+## Endpoints Summary
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Server health check and uptime |
+| `GET` | `/api/inventory` | Full inventory state for all 7 products |
+| `GET` | `/api/inventory/{sku_id}` | Single product stock by SKU ID |
+| `GET` | `/api/events` | Paginated event history with optional SKU filter |
+| `POST` | `/api/events` | Simulate a product removal or return event |
+| `POST` | `/api/mock/event` | Trigger a random mock RETIRO event for testing |
+| `GET` | `/api/predictions` | Stock depletion predictions per SKU (M6) |
+| `GET` | `/api/heatmap` | Slot activity heatmap within a time window (M7) |
+| `GET` | `/api/narratives` | Auto-generated Spanish narrative messages (M8) |
+| `GET` | `/api/analytics` | Live KPI dashboard: fill rate, velocity, alerts |
+| `GET` | `/api/restock` | Priority-scored restock recommendations |
+| `POST` | `/api/inventory/reset` | Reset all products to initial stock of 8 units |
+| `PUT` | `/api/config/threshold` | Update the alert threshold at runtime |
+| `GET` | `/dashboard` | Standalone HTML operations dashboard |
+
+## API Sections
+
+<CardGroup cols={2}>
+  <Card title="Inventory" icon="boxes-stacked" href="/api/inventory">
+    Health check, full inventory state, single-product lookup, and inventory reset.
+  </Card>
+  <Card title="Events" icon="bolt" href="/api/events">
+    Query event history, simulate removals or returns, and fire random mock events.
+  </Card>
+  <Card title="Analytics" icon="chart-line" href="/api/analytics">
+    Real-time KPIs, fill rates, velocity metrics, and restock recommendations.
+  </Card>
+  <Card title="Intelligence" icon="brain" href="/api/intelligence">
+    Depletion predictions (M6), slot heatmaps (M7), and narrative messages (M8).
+  </Card>
+  <Card title="Config" icon="sliders" href="/api/config">
+    Dynamic alert threshold updates and the embedded HTML dashboard.
+  </Card>
+</CardGroup>

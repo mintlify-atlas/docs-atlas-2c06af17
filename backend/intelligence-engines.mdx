@@ -1,0 +1,276 @@
+---
+title: "Intelligence Engines: Prediction, Heatmap, and Narratives"
+sidebarTitle: "Intelligence Engines"
+description: "Three intelligence modules — PredictionEngine, HeatmapEngine, and NarrativeEngine — enrich raw inventory events with stockout forecasts, activity heatmaps, and Spanish narrative alerts."
+---
+
+Anaquel Inteligente 3B ships three intelligence modules that sit above the core inventory layer and transform raw stock events into actionable insights. **PredictionEngine (M6)** forecasts when each product will run out, **HeatmapEngine (M7)** tracks slot interaction intensity over a sliding time window, and **NarrativeEngine (M8)** produces human-readable Spanish-language status messages. All three are attached to `InventoryEngine` via observer callbacks registered at application startup in `main.py`.
+
+---
+
+## PredictionEngine — M6
+
+The `PredictionEngine` uses **exponential weighted smoothing** over the inter-removal intervals of each SKU to estimate the current depletion rate and project a stockout timestamp.
+
+### Constructor
+
+```python
+PredictionEngine(alpha: float = 0.3)
+```
+
+<ParamField path="alpha" type="float" default="0.3">
+  Smoothing factor for the exponential weighted mean of inter-removal
+  intervals. Higher values give more weight to the most recent event;
+  lower values make the estimate more stable. Range: `(0, 1)`.
+</ParamField>
+
+### `predict(history: SKUHistory) -> StockPrediction`
+
+Calculates a stockout prediction for a single SKU.
+
+<Steps>
+  <Step title="Insufficient data guard">
+    If `len(history.events) < 2`, returns a `StockPrediction` with `minutes_remaining=None`, `rate_per_hour=0.0`, `trend="estable"`, and `confidence="baja"`.
+  </Step>
+  <Step title="Already depleted guard">
+    If `history.stock_current <= 0`, returns immediately with `minutes_remaining=0.0`.
+  </Step>
+  <Step title="Compute inter-removal intervals">
+    Events are sorted chronologically and consecutive pairs are subtracted to yield a list of intervals in **minutes**.
+  </Step>
+  <Step title="Exponential smoothing">
+    The smoothed interval `tasa` is initialised to the first interval and updated for each subsequent one:
+
+    ```python
+    tasa = intervalos[0]
+    for intervalo in intervalos[1:]:
+        tasa = self.alpha * intervalo + (1 - self.alpha) * tasa
+    ```
+  </Step>
+  <Step title="Derive rate and ETA">
+    `rate_per_hour = 60 / tasa` and `minutes_remaining = tasa × stock_current`.
+    `estimated_depletion = datetime.now() + timedelta(minutes=minutes_remaining)`.
+  </Step>
+  <Step title="Trend and confidence">
+    Trend compares the average interval of the first half vs the second half of
+    the interval list. Confidence is based on the number of events observed.
+  </Step>
+</Steps>
+
+**`StockPrediction` fields:**
+
+<ResponseField name="sku_id / sku_name" type="str">
+  Identifies the product.
+</ResponseField>
+
+<ResponseField name="stock_current" type="int">
+  Units on shelf at prediction time.
+</ResponseField>
+
+<ResponseField name="rate_per_hour" type="float">
+  Estimated removal rate in units per hour.
+</ResponseField>
+
+<ResponseField name="estimated_depletion" type="datetime | None">
+  Projected datetime of stockout, or `None` if insufficient data.
+</ResponseField>
+
+<ResponseField name="minutes_remaining" type="float | None">
+  Minutes until stockout at the current rate, or `None`.
+</ResponseField>
+
+<ResponseField name="trend" type="str">
+  One of `"acelerando"` (accelerating), `"estable"` (stable), or `"desacelerando"` (slowing). Computed by comparing the average interval of the first half of the event series to the second half: if `avg_new < avg_old × 0.8` → `"acelerando"`; if `avg_new > avg_old × 1.2` → `"desacelerando"`.
+</ResponseField>
+
+<ResponseField name="confidence" type="str">
+  `"alta"` (> 6 events), `"media"` (≥ 3 events), or `"baja"` (< 3 events).
+</ResponseField>
+
+### `predict_all(histories: list[SKUHistory]) -> list[StockPrediction]`
+
+Convenience wrapper that calls `predict()` for each `SKUHistory` in the list and returns all results.
+
+### Usage Example
+
+```python
+from prediction_engine import PredictionEngine
+
+pred = prediction_engine.predict(history)
+if pred.minutes_remaining is not None:
+    print(f"{pred.sku_name} se agotará en {round(pred.minutes_remaining)} minutos")
+```
+
+<Tip>
+  Wire `PredictionEngine` to `InventoryEngine.on_event` so a fresh prediction
+  is computed after every removal, then broadcast the result via Socket.IO to
+  keep the dashboard ETA indicator current.
+</Tip>
+
+---
+
+## HeatmapEngine — M7
+
+The `HeatmapEngine` accumulates `InteractionEvent` records and generates a normalised slot-activity heatmap filtered to a configurable sliding time window.
+
+### `InteractionEvent` Fields
+
+<ResponseField name="slot_id" type="int">
+  Shelf slot number (1–7) where the interaction occurred.
+</ResponseField>
+
+<ResponseField name="sku_id" type="str">
+  Product SKU in that slot.
+</ResponseField>
+
+<ResponseField name="region" type="tuple[int, int, int, int]">
+  Bounding region `(x1, y1, x2, y2)` in pixel coordinates.
+</ResponseField>
+
+<ResponseField name="timestamp" type="datetime">
+  When the interaction was recorded.
+</ResponseField>
+
+<ResponseField name="interaction_type" type="str">
+  `"product_moved"` when a product unit is displaced, or `"hand_detected"` when
+  a hand is detected near the slot.
+</ResponseField>
+
+### Methods
+
+#### `record(interaction: InteractionEvent)`
+
+Appends an `InteractionEvent` to the internal list. Called from the detection callback whenever a significant frame change is detected.
+
+#### `get_heatmap(window_seconds=300) -> dict`
+
+Filters the interaction list to only events within the last `window_seconds` seconds, counts events per `slot_id`, and normalises intensities so the most active slot always has `intensity = 1.0`.
+
+```python
+heatmap = heatmap_engine.get_heatmap(window_seconds=300)
+# {
+#   "slots": [
+#     {"slot_id": 3, "sku_id": "burst_energy", "activity_count": 5, "intensity": 1.0},
+#     {"slot_id": 1, "sku_id": "agua_burst",   "activity_count": 3, "intensity": 0.6},
+#     {"slot_id": 5, "sku_id": "sisi_cola",    "activity_count": 2, "intensity": 0.4},
+#   ],
+#   "window_seconds": 300,
+#   "last_updated": "2024-11-01T14:23:05.123456"
+# }
+```
+
+Slots are returned sorted by `intensity` descending. Slots with zero activity in the window are excluded.
+
+#### `reset()`
+
+Clears all recorded interactions. Call at the start of a demo or test run.
+
+---
+
+## NarrativeEngine — M8
+
+The `NarrativeEngine` generates concise, emoji-decorated **Spanish-language** status messages for display on the retail dashboard. A per-SKU-per-type cooldown prevents the same message from being spammed every few seconds.
+
+### Constructor
+
+```python
+NarrativeEngine(cooldown_seconds: float = 30.0)
+```
+
+<ParamField path="cooldown_seconds" type="float" default="30.0">
+  Minimum seconds that must elapse before the same `(event_type, sku_id)`
+  combination can produce a new message. Set to `0` to disable cooldown
+  (useful in tests).
+</ParamField>
+
+### `generate(event_type: str, **kwargs) -> NarrativeMessage | None`
+
+Generates a narrative message from one of the built-in templates. Returns `None` if the `(event_type, sku_id)` key is still within its cooldown window.
+
+**Supported `event_type` values and their required kwargs:**
+
+<Tabs>
+  <Tab title="retiro">
+    **Template:** `"📦 {sku_name} retirado del anaquel. Stock actual: {stock} unidades"`
+
+    **kwargs:** `sku_name` (str), `stock` (int)
+
+    **Severity:** `"info"` | **Icon:** `📦`
+
+    ```python
+    engine.generate("retiro", sku_name="Nachos Con Sal Naturasol 200gr", stock=5)
+    # → "📦 Nachos Con Sal Naturasol 200gr retirado del anaquel. Stock actual: 5 unidades"
+    ```
+  </Tab>
+  <Tab title="devolucion">
+    **Template:** `"🔄 {sku_name} devuelto al anaquel. Stock ajustado: {before} → {after}"`
+
+    **kwargs:** `sku_name` (str), `before` (int), `after` (int)
+
+    **Severity:** `"info"` | **Icon:** `🔄`
+  </Tab>
+  <Tab title="alerta_umbral">
+    **Template:** `"⚠️ ¡ALERTA! {sku_name} alcanzó el umbral crítico ({pct}%). Reponer urgente."`
+
+    **kwargs:** `sku_name` (str), `pct` (int or float)
+
+    **Severity:** `"critical"` | **Icon:** `⚠️`
+
+    ```python
+    engine.generate("alerta_umbral", sku_name="Nachos Con Sal Naturasol 200gr", pct=25)
+    # → "⚠️ ¡ALERTA! Nachos Con Sal Naturasol 200gr alcanzó el umbral crítico (25%). Reponer urgente."
+    ```
+  </Tab>
+  <Tab title="prediccion">
+    **Template:** `"🔮 {sku_name} se agotará en ~{minutes} min al ritmo actual ({trend})"`
+
+    **kwargs:** `sku_name` (str), `minutes` (int or float), `trend` (str)
+
+    **Severity:** `"warning"` | **Icon:** `🔮`
+
+    ```python
+    engine.generate("prediccion", sku_name="Nachos Con Sal Naturasol 200gr", minutes=15, trend="acelerando")
+    # → "🔮 Nachos Con Sal Naturasol 200gr se agotará en ~15 min al ritmo actual (acelerando)"
+    ```
+  </Tab>
+</Tabs>
+
+### `get_recent(limit=10) -> list[NarrativeMessage]`
+
+Returns the last `limit` generated messages in reverse-chronological order (most recent first).
+
+### `clear()`
+
+Clears both the message history and the cooldown registry. Useful between demo sessions.
+
+### `NarrativeMessage` Fields
+
+<ResponseField name="message_id" type="str">
+  12-character hex string derived from `uuid4`.
+</ResponseField>
+
+<ResponseField name="severity" type="str">
+  `"info"`, `"warning"`, or `"critical"`. Maps to dashboard badge colour.
+</ResponseField>
+
+<ResponseField name="text" type="str">
+  The rendered narrative text in Spanish.
+</ResponseField>
+
+<ResponseField name="sku_id" type="str | None">
+  The SKU the message pertains to, or `None` for general messages (e.g., `"todo_ok"`).
+</ResponseField>
+
+<ResponseField name="timestamp" type="datetime">
+  When the message was generated.
+</ResponseField>
+
+<ResponseField name="icon" type="str">
+  Emoji that prefixes the message. Useful for standalone display in the feed.
+</ResponseField>
+
+<Warning>
+  The cooldown key is `"{event_type}:{sku_id}"`. If `sku_id` is not passed as
+  a kwarg, `sku_name` is used as the key. Make sure to pass `sku_id` explicitly
+  when calling `generate()` so the cooldown tracks the correct product.
+</Warning>

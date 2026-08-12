@@ -1,0 +1,180 @@
+---
+title: "Inventory Endpoints: Stock State and Product Data"
+sidebarTitle: "Inventory"
+description: "REST endpoints for querying real-time inventory state, individual product stock, and triggering inventory resets. All responses reflect the live InventoryEngine state."
+---
+
+These endpoints expose the `InventoryEngine` state via HTTP. The engine maintains a thread-safe in-memory store for all 7 shelf products, applying business logic (stock decrements, alert thresholds, event deduplication) before surfacing data through these routes. Every response reflects the most current state at request time.
+
+---
+
+## GET /api/health
+
+Returns the server's operational status and how many seconds it has been running since startup.
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+<ResponseField name="status" type="string">
+  Always `"ok"` when the server is running.
+</ResponseField>
+
+<ResponseField name="uptime" type="float">
+  Seconds elapsed since the server process started.
+</ResponseField>
+
+```json
+{
+  "status": "ok",
+  "uptime": 142.37
+}
+```
+
+---
+
+## GET /api/inventory
+
+Returns the complete `InventoryState` for all 7 products currently tracked on the shelf.
+
+```bash
+curl http://localhost:8000/api/inventory
+```
+
+<ResponseField name="last_updated" type="string">
+  ISO 8601 timestamp of when the state snapshot was taken.
+</ResponseField>
+
+<ResponseField name="products" type="array">
+  Array of `ProductStock` objects, one per SKU. See fields below.
+</ResponseField>
+
+### ProductStock Object
+
+<ResponseField name="sku_id" type="string">
+  Unique machine-readable identifier for the product (e.g., `"nachos_naturasol"`).
+</ResponseField>
+
+<ResponseField name="sku_name" type="string">
+  Human-readable product name (e.g., `"Nachos Con Sal Naturasol 200gr"`).
+</ResponseField>
+
+<ResponseField name="slot_id" type="integer">
+  Physical shelf slot number (1–7).
+</ResponseField>
+
+<ResponseField name="stock_initial" type="integer">
+  Starting stock level. Always `8` unless overridden at engine initialization.
+</ResponseField>
+
+<ResponseField name="stock_current" type="integer">
+  Current stock units remaining on the shelf (0–`stock_initial`).
+</ResponseField>
+
+<ResponseField name="stock_min_threshold" type="float">
+  Alert threshold as a fraction of `stock_initial` (default `0.20`). An alert fires when `stock_current ≤ stock_initial × stock_min_threshold`.
+</ResponseField>
+
+<ResponseField name="is_alert" type="boolean">
+  `true` when the product is at or below the alert threshold.
+</ResponseField>
+
+<ResponseField name="last_event" type="string | null">
+  ISO 8601 timestamp of the most recent event for this SKU, or `null` if no events have occurred yet.
+</ResponseField>
+
+**Example response (one product shown):**
+
+```json
+{
+  "last_updated": "2024-11-15T10:32:05.123456",
+  "products": [
+    {
+      "sku_id": "nachos_naturasol",
+      "sku_name": "Nachos Con Sal Naturasol 200gr",
+      "slot_id": 4,
+      "stock_initial": 8,
+      "stock_current": 5,
+      "stock_min_threshold": 0.2,
+      "is_alert": false,
+      "last_event": "2024-11-15T10:28:41.009123"
+    }
+  ]
+}
+```
+
+---
+
+## GET /api/inventory/{sku_id}
+
+Returns the `ProductStock` for a single SKU. Returns HTTP 404 if the SKU does not exist.
+
+<ParamField path="sku_id" type="string" required>
+  The unique SKU identifier. Valid values are:
+
+  | sku_id | Product |
+  |---|---|
+  | `agua_burst` | Agua Natural Burst 1500ml |
+  | `burst_energetica_roja` | Bebida Energetica Red Burst 473ml |
+  | `burst_energy` | Bebida Energetica Original Burst Energy 600ml |
+  | `nachos_naturasol` | Nachos Con Sal Naturasol 200gr |
+  | `nebraska_mango` | Bebida Mango-Durazno Nebraska 460ml |
+  | `sisi_cola` | Refresco Cola Sin Azucar Sisi 355ml |
+  | `sun_paradise_naranja` | Bebida Naranja Sun Paradise 900ml |
+</ParamField>
+
+```bash
+curl http://localhost:8000/api/inventory/burst_energy
+```
+
+**200 — Success:**
+
+```json
+{
+  "sku_id": "burst_energy",
+  "sku_name": "Bebida Energetica Original Burst Energy 600ml",
+  "slot_id": 3,
+  "stock_initial": 8,
+  "stock_current": 8,
+  "stock_min_threshold": 0.2,
+  "is_alert": false,
+  "last_event": null
+}
+```
+
+**404 — SKU not found:**
+
+```json
+{
+  "detail": "SKU 'unknown_sku' no encontrado"
+}
+```
+
+---
+
+## POST /api/inventory/reset
+
+Resets all 7 products to their initial stock level (`stock_current = 8`), clears all recorded events, clears the `HeatmapEngine` data, and clears all `NarrativeEngine` messages. Useful for resetting state between demos or test runs.
+
+```bash
+curl -X POST http://localhost:8000/api/inventory/reset
+```
+
+<ResponseField name="status" type="string">
+  Always `"ok"` on success.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable confirmation string.
+</ResponseField>
+
+```json
+{
+  "status": "ok",
+  "message": "Inventario reseteado a stock inicial"
+}
+```
+
+<Warning>
+  This operation is irreversible. All event history, heatmap data, and narrative messages accumulated since the last reset are permanently discarded from memory.
+</Warning>

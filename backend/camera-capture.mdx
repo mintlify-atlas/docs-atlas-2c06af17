@@ -1,0 +1,233 @@
+---
+title: "Camera Capture: RTSP and USB Frame Acquisition"
+sidebarTitle: "Camera Capture"
+description: "CameraCapture manages RTSP or USB camera connections, delivers frames to the detection pipeline, and handles auto-reconnection with configurable backoff."
+---
+
+The **CameraCapture** class is module **M1** of the Anaquel Inteligente 3B pipeline. It wraps OpenCV's `VideoCapture` and abstracts two camera source types: USB cameras (identified by an integer index such as `0`) and IP/NVR cameras via RTSP URLs. The module spawns a dedicated background reader thread that continuously flushes the RTSP buffer, ensuring the detection engine always receives the **most recent** frame rather than a stale one queued in the codec's internal buffer.
+
+<Warning>
+  RTSP streams may have higher latency due to network buffering and codec
+  overhead. Use USB cameras (`source=0`) for demo environments to minimise
+  lag and eliminate dependency on the local network.
+</Warning>
+
+---
+
+## FrameData
+
+Every frame produced by `get_frames()` is wrapped in a `FrameData` dataclass:
+
+<ResponseField name="frame" type="np.ndarray">
+  BGR image array with shape `(H, W, 3)` and dtype `uint8`.
+</ResponseField>
+
+<ResponseField name="timestamp" type="float">
+  `time.time()` captured immediately after the frame was read.
+</ResponseField>
+
+<ResponseField name="frame_id" type="int">
+  Monotonically increasing frame counter, reset to 0 when the capture is
+  (re)started.
+</ResponseField>
+
+<ResponseField name="resolution" type="tuple[int, int]">
+  `(width, height)` of the raw frame as reported by OpenCV.
+</ResponseField>
+
+---
+
+## Constructor
+
+```python
+CameraCapture(source=DEFAULT_RTSP)
+```
+
+<ParamField path="source" type="str | int" default="DEFAULT_RTSP">
+  Camera source. Pass an **`int`** (e.g. `0`) for a USB/built-in camera, or
+  a **string RTSP URL** (e.g.
+  `"rtsp://admin:admin1234@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0"`)
+  for a network camera.
+
+  The built-in default URL (`DEFAULT_RTSP`) points to the development NVR
+  recorded in `assets/cadenadeconexion.md`.
+</ParamField>
+
+---
+
+## Core Methods
+
+### `start() -> bool`
+
+Opens the video source and starts the background reader thread. Returns `True` on success, `False` if the source cannot be opened after exhausting all reconnection attempts.
+
+**Reconnection behaviour on RTSP failure:**
+
+<Steps>
+  <Step title="Initial open attempt">
+    Calls `cv2.VideoCapture(source, cv2.CAP_FFMPEG)` with `CAP_PROP_BUFFERSIZE=1` and 5-second open/read timeouts.
+  </Step>
+  <Step title="Retry loop (up to MAX_RECONNECT=5)">
+    If the initial open fails, retries up to 5 times with a 2-second delay between attempts.
+  </Step>
+  <Step title="USB fallback">
+    If all RTSP attempts fail, automatically falls back to `source=0` (first USB camera).
+  </Step>
+  <Step title="Return value">
+    Returns `True` once any source is successfully opened, `False` if every option fails.
+  </Step>
+</Steps>
+
+---
+
+### `stop()`
+
+Signals the background reader thread to terminate, waits up to 3 seconds for it to join, then releases the `VideoCapture` object. Safe to call multiple times.
+
+---
+
+### `get_frames()`
+
+A generator that yields `FrameData` objects continuously. Each iteration waits up to **2 seconds** for the background reader to produce a new frame. If no frame arrives within the timeout the generator checks the connection status and triggers `_reconnect()` if needed.
+
+```python
+cam = CameraCapture(source=0)
+cam.start()
+
+for fd in cam.get_frames():
+    result = engine.detect(fd.frame)
+    # ... process result
+```
+
+<Note>
+  Only the **most recently captured frame** is yielded — older buffered frames
+  are discarded by the reader thread. This prevents the detection pipeline from
+  falling behind on a fast RTSP feed.
+</Note>
+
+---
+
+### `stream_loop(det_engine, overlay, callback, max_fps=5, stream_width=640, detect_every=2)`
+
+The high-level loop called from `main.py`. It combines frame acquisition, optional resizing, detection, overlay rendering, and callback dispatch in a single blocking call designed to be run inside a thread executor.
+
+<ParamField path="det_engine" type="DetectionEngine | None">
+  Detection engine instance. Pass `None` to stream frames without running
+  inference (e.g. for a raw video preview).
+</ParamField>
+
+<ParamField path="overlay" type="VideoOverlay | None">
+  `VideoOverlay` instance used to draw bounding boxes and encode the frame
+  to base-64 JPEG. Pass `None` to skip overlay rendering.
+</ParamField>
+
+<ParamField path="callback" type="Callable">
+  Called after each frame with the signature
+  `callback(frame_b64: str | None, detection_result: DetectionResult | None, events: list[DetectionEvent]) -> bool`.
+  Return `True` to stop the loop.
+</ParamField>
+
+<ParamField path="max_fps" type="int" default="5">
+  Maximum processed frames per second. Frames that arrive faster are skipped
+  to stay within the budget.
+</ParamField>
+
+<ParamField path="stream_width" type="int" default="640">
+  Frames wider than this value are down-scaled (maintaining aspect ratio)
+  before detection and encoding, reducing CPU load and payload size.
+</ParamField>
+
+<ParamField path="detect_every" type="int" default="2">
+  Run YOLO inference only every `N` frames. On alternating frames the
+  previous `DetectionResult` is reused for the overlay, halving inference
+  load at minimal accuracy cost.
+</ParamField>
+
+---
+
+## Auto-Reconnect with Exponential Backoff
+
+In `main.py`, `stream_loop` is executed inside a dedicated thread via `loop.run_in_executor(None, _run_camera_loop)`. The wrapper function `_run_camera_loop` implements **infinite retries** with exponential backoff:
+
+```python
+def _run_camera_loop():
+    max_retries = 0  # Infinitos reintentos
+    retry_count = 0
+    base_delay = 3  # segundos
+
+    while True:
+        try:
+            _camera = CameraCapture()
+            if not _camera.start():
+                retry_count += 1
+                delay = min(base_delay * retry_count, 30)
+                logger.warning(f"[Cámara] No se pudo iniciar — reintentando en {delay}s")
+                time.sleep(delay)
+                continue
+
+            retry_count = 0  # Reset al conectar exitosamente
+            logger.info("[Cámara] Streaming activo")
+            _camera.stream_loop(
+                _det_engine, _overlay, _camera_callback,
+                max_fps=5, stream_width=640, detect_every=2,
+            )
+        except Exception as e:
+            logger.exception(f"[Cámara] Error en loop: {e}")
+        finally:
+            if _camera:
+                _camera.stop()
+                _camera = None
+
+        # Auto-reinicio con backoff
+        retry_count += 1
+        delay = min(base_delay * retry_count, 30)
+        logger.info(f"[Cámara] Loop terminado — reiniciando en {delay}s")
+        time.sleep(delay)
+```
+
+The backoff delay grows as `min(base_delay × retry_count, 30)`:
+
+| Retry | Delay |
+|-------|-------|
+| 1 | 3 s |
+| 2 | 6 s |
+| 3 | 9 s |
+| 10+ | 30 s (capped) |
+
+Once the camera connects successfully, `retry_count` resets to 0 so the next disconnection starts the backoff from the beginning.
+
+---
+
+## Configuration
+
+The camera source is determined by the `source` argument passed to `CameraCapture()`. In `main.py` the constructor is called without arguments, which means it uses the `DEFAULT_RTSP` constant defined at the top of `camera_capture.py`:
+
+```python
+DEFAULT_RTSP = "rtsp://admin:admin1234@172.31.13.191:554/cam/realmonitor?channel=1&subtype=0"
+```
+
+To change the camera for a deployment:
+
+<CardGroup cols={2}>
+  <Card title="USB Camera" icon="usb">
+    Pass an integer index:
+    ```python
+    CameraCapture(source=0)
+    ```
+    Use `0` for the first USB/built-in camera, `1` for the second, and so on.
+  </Card>
+  <Card title="RTSP Stream" icon="video">
+    Pass the full RTSP URL:
+    ```python
+    CameraCapture(source="rtsp://user:pass@192.168.1.10:554/stream")
+    ```
+    Edit `DEFAULT_RTSP` in `camera_capture.py` to update the default.
+  </Card>
+</CardGroup>
+
+<Tip>
+  During development and automated testing you can pass a **local video file
+  path** as the source (e.g. `CameraCapture(source="tests/fixtures/shelf.mp4")`).
+  OpenCV will read the file frame-by-frame through the same `get_frames()` API,
+  letting you reproduce deterministic sequences without a physical camera.
+</Tip>

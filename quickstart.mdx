@@ -1,47 +1,167 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Anaquel Inteligente 3B"
+sidebarTitle: "Quickstart"
+description: "Set up the Anaquel Inteligente 3B backend and React dashboard from scratch, start the camera pipeline, and see live inventory updates in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+This guide walks you through cloning the repository, installing all Python and Node.js dependencies, launching the FastAPI + Socket.IO backend, starting the React dashboard, and sending your first test events — all without needing a trained YOLO model or a physical camera. By the end you will have a live inventory feed running in your browser.
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you begin, make sure the following are available on your machine:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+- **Python 3.10+** — required for FastAPI, Ultralytics, and all backend modules
+- **Node.js 18+** — required for the Vite-based React frontend
+- **A USB camera or RTSP stream** — needed for live inference; mock endpoints work without one
+- **git** — to clone the repository
 
-## Get started
+---
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Clone the repository">
+    Open a terminal and run:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/elzackarias/Hackaton3B-Reto1.git
+    cd Hackaton3B-Reto1
     ```
+
+    This clones the full monorepo containing `backend/`, `frontend/`, `scripts/`, and `assets/`.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Install all dependencies">
+    A single setup script handles both the Python virtual environment (under `backend/.venv`) and the Node.js packages (under `frontend/node_modules`). Run the variant matching your OS:
+
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    ./scripts/setup-all.sh
+    ```
+
+    ```powershell Windows (PowerShell)
+    .\scripts\setup-all.ps1
+    ```
+
+    </CodeGroup>
+
+    The script runs in two stages: **PASO 1/2** installs Python dependencies from `backend/requirements.txt` into the virtual environment, and **PASO 2/2** runs `npm install` in the `frontend/` directory.
+  </Step>
+
+  <Step title="Start the backend server">
+    Activate the virtual environment and launch Uvicorn. The ASGI app exported from `main.py` is called `combined_app` — it wraps both FastAPI and the Socket.IO server into a single ASGI application:
 
     ```bash
-    your-cli init
+    cd backend
+    source .venv/bin/activate        # Linux / macOS
+    # .venv\Scripts\Activate.ps1     # Windows PowerShell
+
+    uvicorn main:combined_app --host 0.0.0.0 --port 8000 --reload
     ```
+
+    On startup the backend will:
+    1. Initialize all engine instances (`InventoryEngine`, `PredictionEngine`, `HeatmapEngine`, `NarrativeEngine`).
+    2. Register observer callbacks so M6, M7, and M8 react to every inventory event.
+    3. Attempt to start the camera pipeline in a background thread (auto-retries with exponential backoff if no camera is found).
+    4. Expose the Swagger UI at `http://localhost:8000/docs`.
+
+    <Note>
+      The first inference call after startup is noticeably slower than subsequent ones. This is expected: `DetectionEngine.__init__` deliberately runs **3 dummy inferences** on a blank 640×640 frame to warm up the YOLO model and CUDA/CPU kernels before any real video is processed.
+    </Note>
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Start the React dashboard">
+    In a second terminal, from the project root:
 
     ```bash
-    your-cli start
+    cd frontend
+    npm run dev
     ```
+
+    Vite starts the development server. The default port is **5173** — open `http://localhost:5173` in your browser.
+
+    <Tip>
+      If you only want a quick sanity check without running the full React frontend, the backend ships a self-contained HTML dashboard at `http://localhost:8000/dashboard`. It polls the REST API every 3 seconds, shows live KPIs and inventory cards for all 7 SKUs, and renders the priority restock table. No Node.js required.
+    </Tip>
   </Step>
+
+  <Step title="Verify both services are running">
+    | URL | What you should see |
+    |-----|---------------------|
+    | `http://localhost:5173` | React dashboard with live Socket.IO connection indicator |
+    | `http://localhost:8000/docs` | Swagger UI listing all REST endpoints |
+    | `http://localhost:8000/api/health` | `{"status": "ok", "uptime": <seconds>}` |
+    | `http://localhost:8000/dashboard` | Embedded HTML inventory dashboard |
+  </Step>
+
+  <Step title="Trigger a test event via the mock endpoint">
+    The `/api/mock/event` endpoint picks a random SKU and injects a `RETIRO` (removal) event into the inventory engine — no camera or YOLO model needed:
+
+    ```bash
+    curl -X POST http://localhost:8000/api/mock/event
+    ```
+
+    A successful response looks like this:
+
+    ```json
+    {
+      "status": "ok",
+      "event": {
+        "event_id": "3f2e1a4b-...",
+        "event_type": "retiro",
+        "sku_id": "nachos_naturasol",
+        "sku_name": "Nachos Con Sal Naturasol 200 gr",
+        "slot_id": 4,
+        "stock_before": 8,
+        "stock_after": 7,
+        "confidence": 0.95,
+        "timestamp": "2026-03-21T14:32:01.123456"
+      }
+    }
+    ```
+
+    If you have the React dashboard open you will see the stock card for the chosen SKU decrement in real time — the event travels through `InventoryEngine` → observer callbacks → Socket.IO broadcast → React state update.
+
+    <Note>
+      If stock for the randomly chosen SKU is already at 0, the endpoint returns `{"status": "ignored", "message": "Evento ignorado (stock en 0 o duplicado)"}` — this is expected behaviour, not an error. Use `POST /api/inventory/reset` to restore all stocks to 8 before re-running.
+    </Note>
+  </Step>
+
+  <Step title="Simulate a specific product removal">
+    Use `POST /api/events` to inject an event for a named SKU and event type. The `event_type` field accepts `"retiro"` (removal) or `"devolucion"` (return):
+
+    ```bash
+    curl -X POST http://localhost:8000/api/events \
+      -H 'Content-Type: application/json' \
+      -d '{"sku_id": "nachos_naturasol", "event_type": "retiro", "confidence": 0.95}'
+    ```
+
+    You can also simulate a return — for example, putting a product back on the shelf:
+
+    ```bash
+    curl -X POST http://localhost:8000/api/events \
+      -H 'Content-Type: application/json' \
+      -d '{"sku_id": "nachos_naturasol", "event_type": "devolucion", "confidence": 0.92}'
+    ```
+
+    Both requests return the resulting `InventoryEvent` object and simultaneously push an `inventory_update` Socket.IO message to all connected dashboard clients.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+---
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+## What Happens Next
+
+Once both services are running and events are flowing, the dashboard updates in real time across all connected tabs:
+
+- **Stock cards** turn yellow (≤ 50 %) or red (≤ 20 %) as units are removed.
+- **Narrative panel** shows auto-generated Spanish messages such as *"Nachos Naturasol retirado del slot 4. Stock: 7"*.
+- **Predictions panel** displays estimated minutes to depletion once at least 2 removal events have occurred for a SKU.
+- **Heatmap** highlights the most-interacted slots within the configured time window (default: last 5 minutes).
+
+To reset all stocks back to 8 units before running a fresh demo:
+
+```bash
+curl -X POST http://localhost:8000/api/inventory/reset
+```

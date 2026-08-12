@@ -1,0 +1,78 @@
+---
+title: "Configuration Endpoint: Dynamic Threshold Updates"
+sidebarTitle: "Config"
+description: "The PUT /api/config/threshold endpoint lets you update the stock alert threshold at runtime without restarting the server."
+---
+
+The config endpoint lets operators adjust alert sensitivity live during operation. Changing the threshold immediately re-evaluates every product's `is_alert` flag — there is no need to restart the server or wait for the next detection event.
+
+---
+
+## PUT /api/config/threshold
+
+Updates the fractional alert threshold used by `InventoryEngine.set_threshold()`. After the update, all 7 products are synchronously re-evaluated: a product's `is_alert` is set to `true` if `stock_current ≤ stock_initial × threshold`.
+
+<ParamField body="threshold" type="float" required>
+  New alert threshold as a fraction of `stock_initial`. Must be between `0.0` and `1.0` (inclusive). A value of `0.25` means "alert when stock falls to 25% or below of the starting quantity."
+</ParamField>
+
+```bash
+curl -X PUT http://localhost:8000/api/config/threshold \
+  -H 'Content-Type: application/json' \
+  -d '{"threshold": 0.25}'
+```
+
+<ResponseField name="status" type="string">
+  Always `"ok"` on success.
+</ResponseField>
+
+<ResponseField name="threshold" type="float">
+  The new threshold value that is now active.
+</ResponseField>
+
+**Example response:**
+
+```json
+{
+  "status": "ok",
+  "threshold": 0.25
+}
+```
+
+### Threshold Interpretation
+
+With `stock_initial = 8`, the alert triggers when `stock_current ≤ 8 × threshold`. Because stock is an integer, effective alert levels are:
+
+| threshold | Alert triggers when... |
+|---|---|
+| `0.20` (default) | `stock_current ≤ 1.6` → effectively ≤ 1 unit |
+| `0.25` | `stock_current ≤ 2.0` → ≤ 2 units |
+| `0.50` | `stock_current ≤ 4.0` → ≤ 4 units |
+
+<Note>
+  Threshold changes are **in-memory only**. The value is not persisted to disk and will revert to the default `MIN_THRESHOLD = 0.20` the next time the server process is restarted.
+</Note>
+
+---
+
+## GET /dashboard
+
+Returns a standalone HTML operations dashboard page. No frontend build or React app is required — just open the URL in any browser. The dashboard auto-refreshes every 3 seconds by polling `GET /api/analytics` and `GET /api/restock` via `fetch`.
+
+```bash
+# Open in your default browser (macOS)
+open http://localhost:8000/dashboard
+
+# Or simply navigate to:
+# http://localhost:8000/dashboard
+```
+
+The dashboard displays:
+
+- **KPI grid** — total stock, global fill rate, event count, velocity, and active alerts
+- **Inventory cards** — per-product fill rate progress bars color-coded green/yellow/red, with retiro counts and `iventa` values
+- **Restock table** — priority-sorted restock recommendations with urgency badges (`CRITICA`, `MEDIA`, `BAJA`)
+
+<Tip>
+  Visit [http://localhost:8000/dashboard](http://localhost:8000/dashboard) in any browser for an instant operations view — no API client needed. It is especially useful during demos or when the full React frontend is not running.
+</Tip>

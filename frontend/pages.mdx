@@ -1,0 +1,305 @@
+---
+title: "Dashboard Pages: Live Panel, Analytics, Activity, Catalog"
+sidebarTitle: "Pages"
+description: "Detailed guide to all four dashboard pages: LivePanel, ProductCatalog, Analytics, and Activity — what each renders and how they consume real-time WebSocket data."
+---
+
+The dashboard has four pages, each a standalone React component living in `src/pages/`. All four are mounted inside the shared `Layout` shell (sidebar + main content area) and every one of them reads exclusively from the `SocketContext` provided by `useSocket` — there are no local fetches or independent state managers. Data flows in one direction: backend → Socket.IO → `useSocket` state → `useSocketContext()` → page render.
+
+<Tabs>
+  <Tab title="Live Panel">
+    ## Live Panel
+
+    **Route:** `/`  
+    **Component:** `src/pages/LivePanel.tsx`  
+    **Socket data consumed:** `products`, `videoFrame`, `narratives`, `events`, `predictions`, `cameras`, `connected`, `usingMock`
+
+    LivePanel is the default landing view of the dashboard. It combines a live video grid with an inventory bar chart and a real-time narrative feed so operators can see shelf status at a glance.
+
+    ### Layout
+
+    The page is split into two horizontal bands:
+
+    - **Top band (white background):** page heading, connection badge, camera-filter pill toggles, dismissible alert banner, and a KPI bar showing total products, aggregate availability gauge, active alert count, and cameras online.
+    - **Bottom band (light grey background):** a 12-column grid containing the camera feed area (8 cols), inventory bar chart (4 cols), latest events list (5 cols), live narrative feed (4 cols), and an "at-risk products" column (3 cols).
+
+    ### KPI Bar
+
+    Four summary metrics are computed directly from socket state:
+
+    | KPI | Derivation |
+    |---|---|
+    | Productos | `products.length` |
+    | Disponibilidad | `(totalStock / maxStock) * 100` rendered as a semi-circle tick gauge |
+    | Alertas Activas | `products.filter(p => p.alert_active).length` |
+    | Cámaras Online | `cameras.filter(c => c.status === "online").length` |
+
+    ### Alert Banner
+
+    The first undismissed `critical` or `warning` narrative message is shown as a left-bordered banner at the top of the page. Clicking the banner navigates to `/activity`; the × button dismisses it locally without affecting socket state.
+
+    ### Video Feed Area
+
+    Camera feeds are rendered with the `VideoFeed` component. When the "Todas" (all) camera filter is selected, each camera gets its own `VideoFeed` card in a two-column grid. Selecting a specific camera renders a single large feed (`large` prop):
+
+    ```tsx
+    {selectedCam === "all" ? (
+      <div className="grid grid-cols-2 gap-grid-gap">
+        {cameras.map(cam => (
+          <VideoFeed
+            key={cam.source_id}
+            frame={videoFrame}
+            label={cam.label}
+            location={cam.location}
+          />
+        ))}
+      </div>
+    ) : (
+      <VideoFeed
+        frame={videoFrame}
+        label={cameras.find(c => c.source_id === selectedCam)!.label}
+        location={cameras.find(c => c.source_id === selectedCam)!.location}
+        large
+      />
+    )}
+    ```
+
+    ### Inventory Bar Chart
+
+    Stock levels are visualised as a horizontal Recharts `BarChart` (layout `"vertical"`). Each bar is coloured using the same traffic-light threshold used throughout the app:
+
+    | Fill rate | Color |
+    |---|---|
+    | > 50 % | `#22C55E` (green) |
+    | 25 – 50 % | `#F59E0B` (amber) |
+    | ≤ 25 % | `#EF4444` (red) |
+
+    ### Products at Risk Panel
+
+    Predictions with `minutes_remaining < 150` are surfaced in a compact side column. Items with `minutes_remaining < 60` receive a red `border-l-red-500` border; items between 60 and 150 minutes receive amber. Each card shows current stock, estimated minutes to depletion, and trend direction (🔺 Acelerando / ➡️ Estable / 🔻 Desacelerando).
+
+    ### Natural-Language Summary
+
+    Below the KPI bar, LivePanel renders a single prose sentence derived from live socket state — listing critical SKUs, at-risk predictions, and low-stock items — so operators can read overall shelf health without interpreting charts.
+  </Tab>
+
+  <Tab title="Product Catalog">
+    ## Product Catalog
+
+    **Route:** `/products`  
+    **Component:** `src/pages/ProductCatalog.tsx`  
+    **Socket data consumed:** `products`, `cameras`
+
+    ProductCatalog provides a table view of every tracked SKU with its product image, current stock fraction, fill-rate gauge, and alert status. Operators can search, filter by camera, and sort the list to quickly identify which products need restocking.
+
+    ### KPI Bar
+
+    | KPI | Derivation |
+    |---|---|
+    | Productos Activos | `filtered.length` |
+    | Más Vendido | SKU with the highest `(stock_initial - stock_current)` delta |
+    | Disponibilidad | Average fill-rate across filtered products, semi-circle gauge |
+    | Unidades Totales | `filtered.reduce((s, p) => s + p.stock_current, 0)` |
+
+    ### Search and Filters
+
+    - **Text search:** filters by `sku_name` or `sku_id` (case-insensitive).
+    - **Camera filter:** pill toggle to show products from `"all"`, `"cam-1"`, or `"cam-2"`.
+    - **Sort:** three sort modes — A–Z (`sku_name`), Stock ascending, Alerts first.
+
+    ### Product Table
+
+    Each row contains:
+
+    | Column | Content |
+    |---|---|
+    | (image) | Product photo loaded from `/products/<slug>.jpg` |
+    | Producto | `sku_name` + `sku_id` sub-label; camera badge when "all" filter is active |
+    | Stock | `stock_current / stock_initial` units |
+    | Nivel | Semi-circle tick gauge with traffic-light colour |
+    | Estado | `status-badge` labelled Crítico / Bajo / Normal |
+
+    The semi-circle gauge uses the same colour thresholds (≤ 25% red, ≤ 50% amber, otherwise green) as the rest of the application. Rows with `alert_active === true` receive a faint red background tint (`bg-status-red/[0.03]`).
+
+    ### Alert Level Badge
+
+    ```tsx
+    <span className={`status-badge ${
+      product.alert_level === "critical" ? "bg-status-red/10 text-status-red" :
+      product.alert_level === "low"      ? "bg-status-yellow/10 text-status-yellow" :
+                                           "bg-status-green/10 text-status-green"
+    }`}>
+      {product.alert_active && <span className="connection-dot connection-dot-online bg-current" />}
+      {product.alert_level === "critical" ? "Crítico" :
+       product.alert_level === "low"      ? "Bajo"    : "Normal"}
+    </span>
+    ```
+
+    <Note>
+      The catalog shows products for all cameras by default. Because the same 7 SKUs are tracked across `cam-1` and `cam-2`, filtering by a specific camera shows that camera's stock independently — useful when the two shelves are physically separate.
+    </Note>
+  </Tab>
+
+  <Tab title="Analytics">
+    ## Analytics
+
+    **Route:** `/analytics`  
+    **Component:** `src/pages/Analytics.tsx`  
+    **Socket data consumed:** `predictions`, `heatmap`, `events`, `cameras`
+
+    Analytics surfaces the predictive and historical data generated by the backend ML pipeline: a depletion prediction card carousel, a monochromatic activity heatmap, a multi-series stock timeline chart, and a scrollable detection events table.
+
+    ### Prediction Cards
+
+    Predictions are displayed in a paginated carousel (4 cards per view). Each `PredictionCard` shows:
+
+    - SKU name and trend icon (🔺 / ➡️ / 🔻)
+    - Current stock vs. initial (`stock_current/8`)
+    - Consumption rate (`rate_per_hour` units/hr)
+    - Estimated time to depletion (`minutes_remaining` or `—`)
+    - Confidence badge (`alta` / `media` / `baja`)
+
+    Cards receive a left-border urgency colour:
+
+    | `minutes_remaining` | Border colour |
+    |---|---|
+    | < 60 | `border-l-critical` (red) |
+    | 60 – 119 | `border-l-status-yellow` (amber) |
+    | ≥ 120 or `null` | `border-l-status-green` (green) |
+
+    Example card structure from the source:
+
+    ```tsx
+    <div className={`bento-card-static p-card-pad border-l-4 ${borderColor} animate-slide-in`}>
+      <div className="flex items-start justify-between mb-2">
+        <p className="text-dense-xs font-semibold text-gray-700 line-clamp-2">
+          {prediction.sku_name}
+        </p>
+        <span className="text-sm flex-shrink-0">{trendIcon}</span>
+      </div>
+      {/* rate_per_hour, minutes_remaining, confidence rows */}
+    </div>
+    ```
+
+    ### Activity Heatmap
+
+    The heatmap visualises `HeatmapData.slots` as a 4-column grid of cells, each coloured on a monochromatic light-to-dark red scale derived from the `intensity` field (0.0–1.0):
+
+    ```ts
+    function heatmapColor(intensity: number): string {
+      // 0 → #FEE2E2 (lightest red) → 1.0 → #991B1B (darkest red)
+      const r = Math.round(254 + (153 - 254) * intensity);
+      const g = Math.round(226 + (27 - 226) * intensity);
+      const b = Math.round(226 + (27 - 226) * intensity);
+      return `rgb(${r},${g},${b})`;
+    }
+    ```
+
+    Each cell displays the `activity_count` (number of pick/return events in the window) and the truncated SKU name. A numeric colour legend below the grid labels the scale from `0` to `Max`.
+
+    ### Stock Timeline Chart
+
+    Detection events are grouped into 5-minute buckets and rendered as a Recharts `AreaChart` with one `Area` series per SKU. Each series has a distinct colour and optional stroke dash pattern:
+
+    | Series key | Colour | Dash |
+    |---|---|---|
+    | `agua_burst` | `#3B82F6` | solid |
+    | `burst_roja` | `#EF4444` | `4 4` |
+    | `burst_energy` | `#EC4899` | `8 3` |
+    | `nachos` | `#F59E0B` | `2 2` |
+    | `nebraska` | `#14B8A6` | `6 2 2 2` |
+    | `sisi_cola` | `#22C55E` | `8 4 2 4` |
+    | `sun_paradise` | `#8B5CF6` | `6 3` |
+
+    Three time-range buttons control how many 5-minute buckets are shown: **15 min** (4 buckets), **30 min** (6 buckets), **1 hora** (10 buckets).
+
+    ### Detection Events Table
+
+    The bottom section lists all `events` from socket state in a `data-table` layout with columns: Hora, Producto, Acción (↓ Retirado / ↑ Devuelto), Stock (before → after), and Cámara. Rows update automatically as `detection_event` WS messages arrive.
+  </Tab>
+
+  <Tab title="Activity">
+    ## Activity
+
+    **Route:** `/activity`  
+    **Component:** `src/pages/Activity.tsx`  
+    **Socket data consumed:** `narratives`, `events`, `cameras`
+
+    Activity is the audit and monitoring view: a filterable narrative log on the left and a time-sorted detection events table on the right. It is the destination when operators click through an alert banner from LivePanel.
+
+    ### KPI Row
+
+    Four counters summarise the currently filtered data:
+
+    | KPI | Value |
+    |---|---|
+    | Total Eventos | `filteredEvents.length` |
+    | Retiros | `filteredEvents.filter(e => e.action === "removed").length` |
+    | Devoluciones | `filteredEvents.filter(e => e.action === "returned").length` |
+    | Alertas Críticas | `filteredNarratives.filter(n => n.severity === "critical").length` |
+
+    ### Narrative Log
+
+    The left panel (5 of 12 columns) renders every `NarrativeMessage` in descending timestamp order. A severity pill-toggle filters to `all`, `info`, `warning`, or `critical`. Each `NarrativeRow` is styled with a left border whose colour reflects severity:
+
+    | Severity | Border class | Background |
+    |---|---|---|
+    | `critical` | `border-l-critical` | `bg-status-red/[0.03]` |
+    | `warning` | `border-l-status-yellow` | `bg-status-yellow/[0.03]` |
+    | `info` | `border-l-status-blue` | `bg-white` |
+
+    The row also renders the message's `icon` emoji, the `text` string, a formatted timestamp, the `source_id` camera label, and a small severity badge:
+
+    ```tsx
+    <span className={`status-badge text-[8px] ml-auto ${
+      message.severity === "critical" ? "bg-status-red/10 text-status-red"     :
+      message.severity === "warning"  ? "bg-status-yellow/10 text-status-yellow" :
+                                        "bg-status-blue/10 text-status-blue"
+    }`}>
+      {message.severity}
+    </span>
+    ```
+
+    ### Events Table
+
+    The right panel (7 of 12 columns) renders `filteredEvents` in a sticky-header `data-table` with columns: Hora, Producto, Acción, Stock (before → after), and Cam. Action cells use coloured `status-badge` spans — red for removals, green for returns. Both the narrative list and the events table react to the camera filter pill toggles at the top of the page.
+
+    <Note>
+      The narrative feed is capped at 50 messages and the events buffer at 100 entries by the `useSocket` hook (`MAX_NARRATIVES` and `MAX_EVENTS` constants). Older entries are dropped as new ones arrive so memory usage stays bounded during long-running sessions.
+    </Note>
+  </Tab>
+</Tabs>
+
+---
+
+## VideoFeed Component
+
+The `VideoFeed` component (`src/components/VideoFeed.tsx`) handles all camera stream rendering. It accepts a `frame` prop — the raw base64 string from the `video_frame` Socket.IO event — and constructs the full data URI before setting it as the `src` of an `<img>` element:
+
+```tsx
+const frameSrc = frame
+  ? frame.startsWith("data:") ? frame : `data:image/jpeg;base64,${frame}`
+  : null;
+
+// ...
+
+{hasSignal && frameSrc ? (
+  <img
+    src={frameSrc}
+    alt={`Feed de ${label}`}
+    className="w-full h-full object-contain"
+  />
+) : (
+  <div className="...">
+    {/* No-signal placeholder */}
+  </div>
+)}
+```
+
+A 5-second inactivity timer (`NO_SIGNAL_TIMEOUT_MS = 5_000`) flips `hasSignal` back to `false` if no new frame arrives — showing a "Sin señal" placeholder and a grey indicator dot instead of a stale frozen image. The component also accepts `label`, `location`, `large` (controls minimum card height: 420px vs. 260px), and a `children` slot for extra camera controls.
+
+When the user is on any page other than LivePanel (`/`), the `Layout` component renders a `VideoFeedPiP` picture-in-picture overlay so the stream remains visible while browsing other views.
+
+<Tip>
+  During frontend development without a running backend, the `videoFrame` value from `useSocketContext()` will always be `null` because mock data in `src/mocks/mockData.ts` does not include a video stream. The `VideoFeed` component handles this gracefully by showing the "Sin señal — verificar conexión con el backend" placeholder. All other socket state (products, predictions, narratives, events, heatmap) is fully mocked and the UI renders completely.
+</Tip>

@@ -1,0 +1,229 @@
+---
+title: "Analytics Endpoints: KPIs, Fill Rate, and Restock"
+sidebarTitle: "Analytics"
+description: "Real-time analytics endpoints returning shelf KPIs, per-product fill rates, velocity metrics, and priority-scored restock recommendations."
+---
+
+Analytics endpoints aggregate the live `InventoryEngine` state into actionable KPIs and restock guidance. All values are computed on-demand from the in-memory event log and current stock levels — there is no caching layer, so every response reflects the exact state at request time.
+
+---
+
+## GET /api/analytics
+
+Returns a live KPI snapshot of the entire shelf: capacity utilization, event throughput, active alerts, and per-product fill rates.
+
+```bash
+curl http://localhost:8000/api/analytics
+```
+
+### Top-level Response Fields
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 datetime when this analytics snapshot was generated.
+</ResponseField>
+
+<ResponseField name="total_capacity" type="integer">
+  Sum of all `stock_initial` values across the 7 products (`stock_initial × 7`, typically `56`).
+</ResponseField>
+
+<ResponseField name="total_current" type="integer">
+  Sum of `stock_current` across all 7 products.
+</ResponseField>
+
+<ResponseField name="fill_rate_global" type="float">
+  Global shelf fill rate: `total_current / total_capacity`, rounded to 2 decimal places. Range `0.0`–`1.0`.
+</ResponseField>
+
+<ResponseField name="total_events" type="integer">
+  Total number of events (retiros + devoluciones) recorded since the last reset.
+</ResponseField>
+
+<ResponseField name="velocity_per_min" type="float">
+  Rolling event throughput in events per minute, computed from the span between the first and last recorded events. Returns `0.0` if fewer than 2 events exist.
+</ResponseField>
+
+<ResponseField name="alerts_active" type="integer">
+  Number of products currently in alert state (`is_alert = true`).
+</ResponseField>
+
+<ResponseField name="most_sold_sku" type="string | null">
+  `sku_id` of the product with the highest number of retiro events. `null` if no events yet.
+</ResponseField>
+
+<ResponseField name="least_sold_sku" type="string | null">
+  `sku_id` of the product with the fewest retiro events. `null` if no events yet.
+</ResponseField>
+
+<ResponseField name="products" type="array">
+  Per-product breakdown. See sub-fields below.
+</ResponseField>
+
+### Product Analytics Object (within `products` array)
+
+<ResponseField name="sku_id" type="string">
+  Unique SKU identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="string">
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="stock_current" type="integer">
+  Current units on the shelf.
+</ResponseField>
+
+<ResponseField name="stock_initial" type="integer">
+  Initial stock level (always `8`).
+</ResponseField>
+
+<ResponseField name="fill_rate" type="float">
+  Per-product fill rate: `stock_current / stock_initial`, rounded to 2 decimal places.
+</ResponseField>
+
+<ResponseField name="retiros" type="integer">
+  Total number of `retiro` events recorded for this SKU since the last reset.
+</ResponseField>
+
+<ResponseField name="iventa" type="float">
+  Internal sales velocity index from the product catalog. Higher values indicate faster-selling products (e.g., `nachos_naturasol` = `22`, `agua_burst` = `6`).
+</ResponseField>
+
+**Example response:**
+
+```json
+{
+  "timestamp": "2024-11-15T10:45:00.321000",
+  "total_capacity": 56,
+  "total_current": 48,
+  "fill_rate_global": 0.86,
+  "total_events": 12,
+  "velocity_per_min": 2.4,
+  "alerts_active": 0,
+  "most_sold_sku": "nachos_naturasol",
+  "least_sold_sku": "burst_energetica_roja",
+  "products": [
+    {
+      "sku_id": "nachos_naturasol",
+      "sku_name": "Nachos Con Sal Naturasol 200gr",
+      "stock_current": 4,
+      "stock_initial": 8,
+      "fill_rate": 0.5,
+      "retiros": 4,
+      "iventa": 22
+    },
+    {
+      "sku_id": "agua_burst",
+      "sku_name": "Agua Natural Burst 1500ml",
+      "stock_current": 8,
+      "stock_initial": 8,
+      "fill_rate": 1.0,
+      "retiros": 0,
+      "iventa": 6
+    }
+  ]
+}
+```
+
+---
+
+## GET /api/restock
+
+Returns a restock priority list for all products that are not at full stock, sorted by `priority_score` in descending order (most urgent first). If all products are fully stocked, the response is an empty array.
+
+```bash
+curl http://localhost:8000/api/restock
+```
+
+### Priority Score Formula
+
+```
+priority_score = units_missing × iventa × (1 - fill_rate)
+```
+
+Products with high `iventa` (fast sellers) and low `fill_rate` (nearly empty) rank highest.
+
+### Response Fields (per item)
+
+<ResponseField name="sku_id" type="string">
+  Unique SKU identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="string">
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="slot_id" type="integer">
+  Physical shelf slot number (1–7).
+</ResponseField>
+
+<ResponseField name="stock_current" type="integer">
+  Current units remaining on the shelf.
+</ResponseField>
+
+<ResponseField name="stock_initial" type="integer">
+  Target stock level (always `8`).
+</ResponseField>
+
+<ResponseField name="units_missing" type="integer">
+  Units needed to reach full stock: `stock_initial - stock_current`.
+</ResponseField>
+
+<ResponseField name="fill_rate" type="float">
+  Current fill rate: `stock_current / stock_initial`, rounded to 2 decimal places.
+</ResponseField>
+
+<ResponseField name="iventa" type="float">
+  Internal sales velocity index from the product catalog.
+</ResponseField>
+
+<ResponseField name="priority_score" type="float">
+  Computed restock urgency score. Higher = more urgent.
+</ResponseField>
+
+<ResponseField name="is_alert" type="boolean">
+  `true` when the product has crossed the alert threshold.
+</ResponseField>
+
+<ResponseField name="urgency" type="string">
+  Human-readable urgency tier:
+  - `"CRITICA"` — product is in alert state (`is_alert = true`)
+  - `"MEDIA"` — fill rate is 50% or below (`fill_rate ≤ 0.5`)
+  - `"BAJA"` — fill rate is above 50%
+</ResponseField>
+
+**Example response:**
+
+```json
+[
+  {
+    "sku_id": "nachos_naturasol",
+    "sku_name": "Nachos Con Sal Naturasol 200gr",
+    "slot_id": 4,
+    "stock_current": 2,
+    "stock_initial": 8,
+    "units_missing": 6,
+    "fill_rate": 0.25,
+    "iventa": 22,
+    "priority_score": 99.0,
+    "is_alert": true,
+    "urgency": "CRITICA"
+  },
+  {
+    "sku_id": "sun_paradise_naranja",
+    "sku_name": "Bebida Naranja Sun Paradise 900ml",
+    "slot_id": 7,
+    "stock_current": 5,
+    "stock_initial": 8,
+    "units_missing": 3,
+    "fill_rate": 0.63,
+    "iventa": 18,
+    "priority_score": 20.0,
+    "is_alert": false,
+    "urgency": "BAJA"
+  }
+]
+```
+
+<Note>
+  Products at full stock (`units_missing = 0`) are excluded from the response entirely. An empty array `[]` means all 7 products are fully stocked.
+</Note>

@@ -1,0 +1,266 @@
+---
+title: "Configure Anaquel Inteligente 3B"
+sidebarTitle: "Configuration"
+description: "Reference guide to all configurable parameters in Anaquel Inteligente 3B, including detection thresholds, camera source, stock settings, and intelligence engine tuning."
+---
+
+Anaquel Inteligente 3B is configured primarily through Python constants defined directly in each backend module — there is no single external config file. Most parameters are set at startup and control how the YOLOv8 detection, inventory logic, and intelligence engines behave. A small subset of values, such as the stock-alert threshold, can be changed at runtime via the REST API without restarting the server.
+
+---
+
+## Detection Engine Configuration
+
+The `DetectionEngine` class in `backend/detection_engine.py` wraps the YOLOv8 model and controls all inference and event-generation behaviour. Its constructor and instance attributes define the parameters below.
+
+### Model Path
+
+The YOLOv8 model is loaded from a fixed path relative to the repository root:
+
+```
+ROOT/models/best3.pt
+```
+
+where `ROOT` is the parent directory of `backend/`. If this file is absent the engine will raise an error on startup.
+
+### Constructor Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `conf` | `0.1` | YOLO confidence threshold. Lower values detect more instances but increase false positives. Raise to `0.3`–`0.5` in a noisy environment. |
+| `imgsz` | `640` | Inference image size (pixels, square). Larger values improve accuracy at the cost of speed. |
+| `save_frames` | `False` | When `True`, annotated debug frames are written to `backend/debug_frames/`. Disable in production to avoid disk growth. |
+
+### Instance Attributes
+
+| Parameter | Default | Description |
+|---|---|---|
+| `cooldown_seconds` | `3.0` | Minimum seconds between events for the same shelf slot. Prevents duplicate events when a product is held in view. |
+| `consistency_frames` | `3` | Number of consecutive frames where a count change must be observed before an event is emitted. Acts as an anti-flicker filter. |
+| `STOCK_INITIAL` | `8` | Baseline units per SKU used to compute `stock_level` (`ok` / `warning` / `critical`) on each detected bounding box. |
+
+<Note>
+`STOCK_INITIAL` is also defined independently in `inventory_engine.py` (see below). Both constants must agree. The detection engine uses it only for visual stock-level colouring on debug frames; the inventory engine uses it to track real stock counts.
+</Note>
+
+### Changing Detection Parameters at Runtime
+
+The `DetectionEngine` does not expose a hot-reload endpoint. To change `conf`, `imgsz`, `cooldown_seconds`, or `consistency_frames` you must restart the backend after editing the defaults in `detection_engine.py`, or instantiate the class with the desired values when you integrate it into a custom pipeline.
+
+---
+
+## Inventory Engine Configuration
+
+The `InventoryEngine` class in `backend/inventory_engine.py` maintains stock counts for all 7 SKUs, applies business logic, and fires observer callbacks. Its module-level constants are the primary tuning surface.
+
+### Module-Level Constants
+
+| Constant | Default | Description |
+|---|---|---|
+| `STOCK_INITIAL` | `8` | Starting stock count assigned to every SKU on engine initialisation or after a reset. |
+| `CONFIDENCE_THRESHOLD` | `0.15` | Minimum event confidence required to process an incoming `DetectionEvent`. Events below this value are silently discarded. The `DetectionEngine` already filters by `conf`, so this is a second-pass guard. |
+| `MIN_THRESHOLD` | `0.20` | Alert threshold expressed as a fraction of `STOCK_INITIAL`. An alert fires when `stock_current / stock_initial <= MIN_THRESHOLD` (i.e., at or below 20 % of baseline, which equals ≤ 1.6 units when `STOCK_INITIAL = 8`). |
+| `MAX_EVENTS` | `1000` | Maximum `InventoryEvent` objects held in memory. Older events are evicted automatically (bounded `deque`). |
+| `MAX_TIMESTAMPS_PER_SKU` | `500` | Maximum removal timestamps stored per SKU for use by the prediction engine. |
+
+### Hot-Reloadable: Alert Threshold
+
+The alert threshold (`MIN_THRESHOLD`) can be changed at runtime without restarting the server:
+
+```http
+PUT /api/config/threshold
+Content-Type: application/json
+
+{ "threshold": 0.30 }
+```
+
+`threshold` must be in the range `0.0`–`1.0`. The engine immediately re-evaluates all active alerts against the new threshold.
+
+```bash
+# Example: raise alert threshold to 30 %
+curl -X PUT http://localhost:8000/api/config/threshold \
+  -H "Content-Type: application/json" \
+  -d '{"threshold": 0.30}'
+```
+
+<Warning>
+Setting `threshold` to `0.0` disables all stock alerts. Setting it to `1.0` will immediately flag every product as critical.
+</Warning>
+
+---
+
+## Intelligence Engine Configuration
+
+Three intelligence engines live in the backend and are instantiated in `main.py` as module-level singletons.
+
+### PredictionEngine (`backend/prediction_engine.py`)
+
+```python
+prediction_engine = PredictionEngine(alpha=0.3)
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `alpha` | `0.3` | Exponential smoothing factor applied to inter-removal intervals. Range `0.0`–`1.0`. Increase toward `1.0` for more responsiveness to recent data; decrease toward `0.0` for a smoother, slower-to-change prediction. |
+
+A minimum of 2 removal timestamps per SKU are required before a prediction is emitted. Predictions include `rate_per_hour`, `minutes_remaining`, and a `trend` string (`estable`, `creciente`, or `decreciente`).
+
+### NarrativeEngine (`backend/narrative_engine.py`)
+
+```python
+narrative_engine = NarrativeEngine(cooldown_seconds=30.0)
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `cooldown_seconds` | `30.0` | Minimum seconds between narrative messages of the **same type for the same SKU**. Prevents flooding the dashboard with repeated removal messages. |
+
+Narrative event types: `retiro`, `devolucion`, `alerta_umbral`, `prediccion`, `todo_ok`, `resumen`, `alta_demanda`.
+
+### HeatmapEngine (`backend/heatmap_engine.py`)
+
+```python
+heatmap_engine = HeatmapEngine()
+```
+
+`HeatmapEngine` has no constructor parameters. Its only tuning surface is the `window_seconds` parameter on the `GET /api/heatmap` endpoint:
+
+```http
+GET /api/heatmap?window=300
+```
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| `window_seconds` | `300` | `10`–`3600` | Rolling time window (seconds) over which slot interactions are counted and normalised. Shorter windows reveal recent hot-spots; longer windows show historical patterns. |
+
+---
+
+## Camera Configuration
+
+The camera pipeline is managed by `CameraCapture` in `backend/camera_capture.py` and started inside `_run_camera_loop` in `backend/main.py`.
+
+### Source
+
+`CameraCapture` accepts a `source` argument in its constructor:
+
+- **USB webcam** — pass an integer device index, e.g. `0` for the first camera, `1` for the second.
+- **IP / RTSP camera** — pass a full URL string, e.g.:
+  ```
+  rtsp://user:password@192.168.1.100:554/cam/realmonitor?channel=1&subtype=0
+  ```
+
+The default source in `camera_capture.py` is the RTSP URL hardcoded as `DEFAULT_RTSP`. If the RTSP stream fails after `MAX_RECONNECT` (5) attempts, the capture automatically falls back to USB device `0`.
+
+### Stream Loop Parameters
+
+These are passed to `CameraCapture.stream_loop()` from `_run_camera_loop` in `main.py`:
+
+| Parameter | Value | Description |
+|---|---|---|
+| `max_fps` | `5` | Maximum frames processed per second. Excess frames are dropped to reduce CPU/GPU load. |
+| `stream_width` | `640` | Frames are resized to this width before detection and streaming. |
+| `detect_every` | `2` | Run YOLO inference every N frames. `2` means every other frame is inferred; intermediate frames reuse the previous detection result for the overlay. |
+
+### Auto-Reconnect
+
+If the camera loop exits (disconnection or exception), `_run_camera_loop` automatically attempts to restart:
+
+- **Base delay:** `base_delay = 3` seconds
+- **Maximum delay:** `min(base_delay * retry_count, 30)` seconds — caps at 30 seconds after repeated failures.
+- Retries are unlimited (`max_retries = 0`).
+
+---
+
+## Backend Server Configuration
+
+### Host & Port
+
+The combined ASGI application (FastAPI + Socket.IO) is launched with:
+
+```bash
+uvicorn main:combined_app --host 0.0.0.0 --port 8000
+```
+
+`combined_app` is the `socketio.ASGIApp` wrapper defined at the bottom of `main.py`.
+
+### CORS
+
+CORS is currently configured to allow all origins:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+<Warning>
+The wildcard `allow_origins=["*"]` is suitable for development and local demos. For production deployments, replace `"*"` with the specific origin(s) of your frontend, e.g. `["https://your-dashboard.example.com"]`.
+</Warning>
+
+### WebSocket (Socket.IO)
+
+```python
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+```
+
+Socket.IO is also configured to accept connections from any origin. Restrict `cors_allowed_origins` in production.
+
+---
+
+## Frontend Configuration
+
+### Backend URL
+
+The React frontend connects to the backend via the constant defined in `frontend/src/hooks/useSocket.ts`:
+
+```typescript
+const BACKEND_URL = "http://localhost:8000";
+```
+
+Change this value if your backend runs on a different host or port. The frontend automatically falls back to built-in mock data if it cannot establish a Socket.IO connection within `CONNECT_TIMEOUT_MS = 3000` milliseconds.
+
+### Vite Dev Server
+
+The Vite dev server is configured in `frontend/vite.config.ts`:
+
+```typescript
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+  },
+});
+```
+
+The frontend development server runs on **port 3000** by default.
+
+---
+
+## Summary Configuration Reference
+
+| Parameter | Module | Default | Hot-reload? | Description |
+|---|---|---|---|---|
+| `conf` | `detection_engine.py` | `0.1` | No | YOLO confidence threshold |
+| `imgsz` | `detection_engine.py` | `640` | No | Inference image size (px) |
+| `cooldown_seconds` | `detection_engine.py` | `3.0` | No | Per-slot event cooldown (seconds) |
+| `consistency_frames` | `detection_engine.py` | `3` | No | Frames required to confirm a change |
+| `save_frames` | `detection_engine.py` | `False` | No | Save annotated debug frames to disk |
+| `STOCK_INITIAL` (detection) | `detection_engine.py` | `8` | No | Baseline units per SKU for stock-level colouring |
+| `STOCK_INITIAL` (inventory) | `inventory_engine.py` | `8` | No | Baseline units per SKU for inventory tracking |
+| `CONFIDENCE_THRESHOLD` | `inventory_engine.py` | `0.15` | No | Minimum event confidence to process |
+| `MIN_THRESHOLD` | `inventory_engine.py` | `0.20` | **Yes** — `PUT /api/config/threshold` | Alert when stock ≤ threshold × initial |
+| `MAX_EVENTS` | `inventory_engine.py` | `1000` | No | Maximum events held in memory |
+| `MAX_TIMESTAMPS_PER_SKU` | `inventory_engine.py` | `500` | No | Max removal timestamps per SKU |
+| `alpha` | `prediction_engine.py` | `0.3` | No | Exponential smoothing factor |
+| `cooldown_seconds` | `narrative_engine.py` | `30.0` | No | Min seconds between same-type narratives |
+| `window_seconds` | `heatmap_engine.py` | `300` | **Yes** — `GET /api/heatmap?window=` | Heatmap rolling window (10–3600 s) |
+| Camera `source` | `camera_capture.py` | RTSP URL / `0` | No | USB index or RTSP URL |
+| `max_fps` | `camera_capture.py` | `5` | No | Max frames processed per second |
+| `stream_width` | `camera_capture.py` | `640` | No | Frame width before detection |
+| `detect_every` | `camera_capture.py` | `2` | No | Inference every N frames |
+| Backend host/port | `main.py` (uvicorn) | `0.0.0.0:8000` | No | Server bind address and port |
+| `BACKEND_URL` | `useSocket.ts` | `http://localhost:8000` | No | Frontend → backend connection URL |
+| Vite dev port | `vite.config.ts` | `3000` | No | Frontend development server port |

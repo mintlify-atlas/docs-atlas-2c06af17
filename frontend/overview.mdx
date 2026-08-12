@@ -1,0 +1,121 @@
+---
+title: "Dashboard Frontend: React Real-Time Inventory UI"
+sidebarTitle: "Overview"
+description: "The Anaquel Inteligente 3B dashboard is a React + Vite application that renders live inventory state, video feeds, predictions, heatmaps, and event logs via Socket.IO."
+---
+
+The Anaquel Inteligente 3B dashboard is built with **React 18**, **Vite**, **TailwindCSS**, **Recharts**, **socket.io-client**, and **react-router-dom**. It connects to the FastAPI + Socket.IO backend at `http://localhost:8000` to display live shelf inventory, camera streams, depletion predictions, activity heatmaps, and narrative alerts — all without barcodes, RFID tags, or manual input. The app starts immediately with mock data while it attempts to connect, so the UI is always usable even without a running backend.
+
+## Directory Structure
+
+```
+frontend/
+├── src/
+│   ├── App.tsx           — router setup, 4 routes
+│   ├── components/
+│   │   ├── Layout.tsx    — sidebar + main content shell
+│   │   ├── Sidebar.tsx   — navigation with 4 items
+│   │   ├── VideoFeed.tsx — MJPEG/base64 live camera stream
+│   │   └── VideoFeedPiP.tsx — picture-in-picture video
+│   ├── hooks/
+│   │   └── useSocket.ts  — Socket.IO hook managing all WS events
+│   ├── pages/
+│   │   ├── LivePanel.tsx     — video + real-time stock cards
+│   │   ├── Analytics.tsx     — charts and predictions
+│   │   ├── Activity.tsx      — event log and narratives
+│   │   └── ProductCatalog.tsx — product grid with stock status
+│   ├── mocks/
+│   │   └── mockData.ts   — mock data for development without backend
+│   └── types/index.ts    — TypeScript interfaces
+└── vite.config.ts
+```
+
+## Dependencies
+
+The following runtime packages are declared in `package.json`:
+
+| Package | Version | Purpose |
+|---|---|---|
+| `react` | `^18.3.1` | UI framework |
+| `react-dom` | `^18.3.1` | UI framework (DOM renderer) |
+| `react-router-dom` | `^7.13.1` | Client-side routing |
+| `recharts` | `^2.12.7` | Charts and graphs (AreaChart, BarChart) |
+| `socket.io-client` | `^4.7.5` | WebSocket connection to the backend |
+
+TailwindCSS (`^3.4.6`), TypeScript (`~5.5.3`), and Vite (`^5.3.4`) are installed as dev dependencies.
+
+## Navigation Views
+
+The application exposes four top-level routes, all rendered inside the shared `Layout` shell:
+
+| ViewId | Path | Component | Description |
+|---|---|---|---|
+| `live` | `/` | `LivePanel` | Video feed + real-time stock cards and inventory bar chart |
+| `products` | `/products` | `ProductCatalog` | Product grid with semi-circle gauges and stock status |
+| `analytics` | `/analytics` | `Analytics` | Fill rate area chart, depletion prediction cards, and heatmap |
+| `activity` | `/activity` | `Activity` | Event log table and severity-colored narrative messages |
+
+Navigation items are defined in `src/mocks/mockData.ts` as `NAV_ITEMS` and consumed by `Sidebar.tsx`:
+
+```ts
+export const NAV_ITEMS: NavItem[] = [
+  { id: "live",      label: "Panel en Vivo", icon: "📹", path: "/" },
+  { id: "products",  label: "Productos",     icon: "📦", path: "/products" },
+  { id: "analytics", label: "Analytics",     icon: "📊", path: "/analytics" },
+  { id: "activity",  label: "Actividad",     icon: "📋", path: "/activity" },
+];
+```
+
+## Dev Server
+
+The Vite dev server is configured in `vite.config.ts` to run on **port 3000**:
+
+```ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+  },
+});
+```
+
+Start the dev server with:
+
+```bash
+npm install
+npm run dev
+```
+
+The app will be available at `http://localhost:3000`. The backend is expected at `http://localhost:8000`.
+
+## Development with Mock Data
+
+When the backend is unavailable or unreachable, the dashboard falls back automatically to the static fixtures in `src/mocks/mockData.ts`. This file exports fully-typed mock objects for every domain entity the UI needs:
+
+| Export | Type | Description |
+|---|---|---|
+| `MOCK_STORE` | `StoreConfig` | Store metadata with 2 demo cameras (cam-1, cam-2) |
+| `MOCK_PRODUCTS_CAM1` | `ProductStock[]` | 7 SKUs assigned to cam-1 |
+| `MOCK_PRODUCTS_CAM2` | `ProductStock[]` | Same 7 SKUs assigned to cam-2 |
+| `ALL_MOCK_PRODUCTS` | `ProductStock[]` | Combined cam-1 + cam-2 products |
+| `MOCK_PREDICTIONS` | `StockPrediction[]` | Depletion predictions for all 7 SKUs |
+| `MOCK_HEATMAP` | `HeatmapData` | Activity heatmap with 7 slots |
+| `MOCK_NARRATIVES` | `NarrativeMessage[]` | 6 sample narrative messages |
+| `MOCK_EVENTS` | `DetectionEvent[]` | 5 sample detection events |
+| `NAV_ITEMS` | `NavItem[]` | Sidebar navigation definitions |
+
+<Tip>
+  The `useSocket` hook pre-populates all state slices with mock data on mount — before the first Socket.IO connection attempt completes. This means the UI renders immediately with realistic data, making it safe to develop and demo the frontend independently of the backend. The `usingMock: true` flag in the socket state signals which data source is active.
+</Tip>
+
+The `usingMock` boolean surfaced by `useSocketContext()` is displayed in `LivePanel` as a connection status badge:
+
+```tsx
+<span className={`connection-dot ${connected ? "connection-dot-online" : "connection-dot-offline"}`} />
+<span className="text-[10px] font-medium">
+  {connected ? "Conectado" : usingMock ? "Mock" : "Desconectado"}
+</span>
+```

@@ -1,0 +1,310 @@
+---
+title: "Inventory Engine: Real-Time Stock State Management"
+sidebarTitle: "Inventory Engine"
+description: "InventoryEngine is the core M3 module that maintains stock counters for 7 SKUs, applies business logic, fires alert callbacks, and exposes analytics and restock recommendations."
+---
+
+The **InventoryEngine** is module **M3** of the Anaquel Inteligente 3B system. It is the single authoritative source of stock truth: it accepts `DetectionEvent` objects from M2, applies business rules to update per-SKU counters, and notifies downstream modules (M4, M6, M8) through the **observer pattern**. All internal state mutations are protected by a `threading.Lock`, making the engine safe to call from the camera thread while REST and WebSocket handlers read concurrently.
+
+---
+
+## Product Catalog
+
+The engine pre-seeds its state with the following 7 products, drawn directly from the `PRODUCTOS` list in `inventory_engine.py`.
+
+| `sku_id` | `slot_id` | Display Name | Barcode | `iventa` |
+|----------------------------------|-----------|------------------------------------------------------|---------------|----------|
+| `agua_burst` | 1 | Agua Natural Burst 1500ml | 7502261250185 | 6 |
+| `burst_energetica_roja` | 2 | Bebida Energetica Red Burst 473ml | 7502261254411 | 1 |
+| `burst_energy` | 3 | Bebida Energetica Original Burst Energy 600ml | 7502261273047 | 12.5 |
+| `nachos_naturasol` | 4 | Nachos Con Sal Naturasol 200gr | 7503052023278 | 22 |
+| `nebraska_mango` | 5 | Bebida Mango-Durazno Nebraska 460ml | 7502261273504 | 14 |
+| `sisi_cola` | 6 | Refresco Cola Sin Azucar Sisi 355ml | 7502261272415 | 11 |
+| `sun_paradise_naranja` | 7 | Bebida Naranja Sun Paradise 900ml | 7502261269576 | 18 |
+
+`iventa` is the product's sale velocity index used for restock prioritisation.
+
+---
+
+## Constants
+
+| Constant | Value | Purpose |
+|--------------------------|-------|----------------------------------------------------------|
+| `STOCK_INITIAL` | `8` | Starting units per SKU; also the maximum clamp for `DEVOLUCION`. |
+| `CONFIDENCE_THRESHOLD` | `0.15` | Events with `confidence` below this are silently ignored. |
+| `MIN_THRESHOLD` | `0.20` | Alert fires when `stock_current ≤ STOCK_INITIAL × 0.20` (≤ 1.6 units, effectively ≤ 1). |
+| `MAX_EVENTS` | `1000` | Maximum `InventoryEvent` objects kept in the in-memory deque. |
+
+---
+
+## Constructor
+
+<ParamField path="stock_initial" type="int" default="8">
+  Initial (and maximum) stock units per SKU.
+</ParamField>
+
+<ParamField path="confidence_threshold" type="float" default="0.15">
+  Minimum `DetectionEvent.confidence` required for an event to be processed.
+</ParamField>
+
+<ParamField path="min_threshold" type="float" default="0.20">
+  Fractional stock level that triggers an alert. For example, `0.20` means
+  an alert fires when `stock_current ≤ stock_initial × 0.20`.
+</ParamField>
+
+---
+
+## Public Methods
+
+### `process_event`
+
+```python
+def process_event(self, detection: DetectionEvent) -> InventoryEvent | None
+```
+
+The main entry point. Receives a `DetectionEvent` from M2 and returns the resulting `InventoryEvent`, or `None` if the event was skipped.
+
+<Steps>
+  <Step title="Confidence gate">
+    Events with `detection.confidence < confidence_threshold` are logged and discarded.
+  </Step>
+  <Step title="Deduplication">
+    `event_id` is checked against `_processed_ids`. Duplicate events are ignored.
+  </Step>
+  <Step title="Apply business logic (under lock)">
+    - `RETIRO`: `stock_current = max(0, stock_current - 1)`
+    - `DEVOLUCION`: `stock_current = min(stock_initial, stock_current + 1)`
+    - Removal timestamps are appended to `_event_timestamps[sku_id]` (used by PredictionEngine M6).
+  </Step>
+  <Step title="Recalculate alert state">
+    `is_alert = stock_current ≤ stock_initial × min_threshold`. An **alert transition** (`was_alert=False → is_alert=True`) triggers `on_alert` callbacks.
+  </Step>
+  <Step title="Notify observers">
+    All registered `on_event` callbacks are called. If an alert transition occurred, `on_alert` callbacks are also called.
+  </Step>
+</Steps>
+
+---
+
+### `on_event(callback)`
+
+```python
+def on_event(self, callback: Callable)
+```
+
+Registers an observer called after **every successfully processed event**.
+
+Callback signature: `cb(event: InventoryEvent, stock: ProductStock)`
+
+---
+
+### `on_alert(callback)`
+
+```python
+def on_alert(self, callback: Callable)
+```
+
+Registers an observer called only when a product transitions **into** the alert state for the first time (i.e., `was_alert` was `False`).
+
+Callback signature: `cb(event: InventoryEvent, stock: ProductStock)`
+
+<Note>
+  Alerts do **not** re-fire on subsequent removals while the product is already
+  in alert state. The transition guard ensures callbacks are called at most once
+  per alert episode.
+</Note>
+
+---
+
+### `get_state()`
+
+```python
+def get_state(self) -> InventoryState
+```
+
+Returns a **deep copy** of the full inventory state as an `InventoryState` object containing `last_updated` (datetime) and `products` (list of `ProductStock`). Thread-safe.
+
+---
+
+### `get_product(sku_id)`
+
+```python
+def get_product(self, sku_id: str) -> ProductStock | None
+```
+
+Returns a copy of the `ProductStock` for a single SKU, or `None` if the `sku_id` is not recognised.
+
+---
+
+### `get_events(limit=50)`
+
+```python
+def get_events(self, limit: int = 50) -> list[InventoryEvent]
+```
+
+Returns the most recent `limit` inventory events in reverse-chronological order (newest first).
+
+---
+
+### `get_history(sku_id)`
+
+```python
+def get_history(self, sku_id: str) -> SKUHistory | None
+```
+
+Returns an `SKUHistory` object containing all removal timestamps for the given SKU. This is consumed by the **PredictionEngine (M6)** to forecast stockout time.
+
+<ResponseField name="SKUHistory.events" type="list[datetime]">
+  Timestamps of every `RETIRO` event, capped at `MAX_TIMESTAMPS_PER_SKU = 500`.
+</ResponseField>
+
+---
+
+### `get_all_histories()`
+
+```python
+def get_all_histories(self) -> list[SKUHistory]
+```
+
+Returns `SKUHistory` objects for all 7 SKUs. Used by `predict_all` in M6.
+
+---
+
+### `get_analytics()`
+
+```python
+def get_analytics(self) -> dict
+```
+
+Returns a real-time KPI snapshot of the shelf.
+
+<ResponseField name="total_capacity" type="int">
+  `stock_initial × 7` (maximum possible units across all SKUs).
+</ResponseField>
+
+<ResponseField name="total_current" type="int">
+  Sum of `stock_current` across all products.
+</ResponseField>
+
+<ResponseField name="fill_rate_global" type="float">
+  `total_current / total_capacity` rounded to 2 decimal places.
+</ResponseField>
+
+<ResponseField name="total_events" type="int">
+  Total events processed since last reset.
+</ResponseField>
+
+<ResponseField name="velocity_per_min" type="float">
+  Overall event rate: `total_events / elapsed_minutes`.
+</ResponseField>
+
+<ResponseField name="alerts_active" type="int">
+  Number of SKUs currently in alert state.
+</ResponseField>
+
+<ResponseField name="most_sold_sku" type="str | None">
+  The `sku_id` with the highest removal count, or `None` if no events yet.
+</ResponseField>
+
+<ResponseField name="products" type="list[dict]">
+  Per-product breakdown including `fill_rate`, `retiros` count, and `iventa`.
+</ResponseField>
+
+---
+
+### `get_restock()`
+
+```python
+def get_restock(self) -> list[dict]
+```
+
+Returns a prioritised restock list (products at full stock are excluded). Results are sorted descending by `priority_score`.
+
+**Priority score formula:**
+
+```
+priority_score = units_missing × iventa × (1 - fill_rate)
+```
+
+Urgency is derived from the alert state and fill rate:
+
+| Condition | `urgency` |
+|-----------|-----------|
+| `is_alert = True` | `"CRITICA"` |
+| `fill_rate ≤ 0.50` | `"MEDIA"` |
+| otherwise | `"BAJA"` |
+
+---
+
+### `reset()`
+
+```python
+def reset(self)
+```
+
+Resets all SKUs to `stock_initial`, clears the event deque, clears the deduplication set, and clears all removal timestamps. Useful for demos and end-to-end tests.
+
+---
+
+### `set_threshold(threshold)`
+
+```python
+def set_threshold(self, threshold: float)
+```
+
+Hot-reloads the alert threshold without restarting the engine. The new value is applied immediately to all `ProductStock` entries, and `is_alert` flags are recomputed.
+
+---
+
+## Alert Logic
+
+An alert fires when **both** conditions are true:
+
+1. `stock_current <= stock_initial * min_threshold` (e.g., ≤ 1 unit at the default 20% threshold with `STOCK_INITIAL=8`)
+2. `was_alert` was `False` before this event (transition guard)
+
+```python
+alert_level = self.stock_initial * self.min_threshold
+product.is_alert = product.stock_current <= alert_level
+alert_transition = product.is_alert and not was_alert
+```
+
+---
+
+## Code Example
+
+```python
+from inventory_engine import InventoryEngine
+from contracts import DetectionEvent, EventType
+import uuid
+from datetime import datetime
+
+engine = InventoryEngine()
+
+def on_alert(event, stock):
+    print(f"ALERT: {event.sku_name} stock={stock.stock_current}")
+
+engine.on_alert(on_alert)
+
+event = DetectionEvent(
+    event_id=str(uuid.uuid4()),
+    event_type=EventType.RETIRO,
+    sku_id="nachos_naturasol",
+    sku_name="Nachos Con Sal Naturasol 200gr",
+    slot_id=4,
+    confidence=0.95,
+    timestamp=datetime.now(),
+    bbox=(0, 0, 0, 0),
+    count_before=3,
+    count_after=2,
+)
+inv_event = engine.process_event(event)
+print(inv_event.stock_after)  # 7 (first removal from initial stock of 8)
+```
+
+<Note>
+  The `InventoryEngine` is instantiated once at application startup in
+  `main.py` and shared across the camera callback, REST endpoints, and
+  Socket.IO event handlers. Never create multiple instances — they would
+  each maintain independent state.
+</Note>

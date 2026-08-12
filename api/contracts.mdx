@@ -1,0 +1,435 @@
+---
+title: "Data Contracts: Shared Types and Dataclasses"
+sidebarTitle: "Contracts"
+description: "Complete reference for all shared Python dataclasses and TypeScript interfaces used across the Anaquel Inteligente 3B system, defined in backend/contracts.py and frontend/src/types/index.ts."
+---
+
+`backend/contracts.py` centralizes every inter-module data type used across the Anaquel Inteligente 3B pipeline — from YOLOv8 detections (M2) through inventory tracking (M3), predictions (M6), heatmaps (M7), and narrative generation (M8). `frontend/src/types/index.ts` mirrors the key types in TypeScript so the React dashboard stays in sync with the backend contracts without a shared code-gen step.
+
+---
+
+## Python Dataclasses (`contracts.py`)
+
+---
+
+### `EventType`
+
+An `Enum` that identifies the direction of a stock movement. Used as the `event_type` field on `DetectionEvent`.
+
+<ResponseField name="RETIRO" type="string">
+  Value: `"retiro"`. A product was removed from the shelf by a customer.
+</ResponseField>
+
+<ResponseField name="DEVOLUCION" type="string">
+  Value: `"devolucion"`. A product was returned to the shelf.
+</ResponseField>
+
+```python
+from enum import Enum
+
+class EventType(Enum):
+    RETIRO     = "retiro"
+    DEVOLUCION = "devolucion"
+```
+
+---
+
+### `DetectionEvent`
+
+**Contract C2** — produced by the Detection Engine (M2) and consumed by the Inventory Engine (M3). Carries the raw vision data for a single stock-movement event detected by YOLOv8.
+
+<ResponseField name="event_id" type="str" required>
+  UUID string uniquely identifying this detection event.
+</ResponseField>
+
+<ResponseField name="event_type" type="EventType" required>
+  `EventType.RETIRO` or `EventType.DEVOLUCION`.
+</ResponseField>
+
+<ResponseField name="sku_id" type="str" required>
+  Machine-readable product identifier, e.g. `"nachos_naturasol"`.
+</ResponseField>
+
+<ResponseField name="sku_name" type="str" required>
+  Human-readable product name, e.g. `"Nachos Con Sal Naturasol 200gr"`.
+</ResponseField>
+
+<ResponseField name="slot_id" type="int" required>
+  Shelf slot number where the detection occurred.
+</ResponseField>
+
+<ResponseField name="confidence" type="float" required>
+  YOLOv8 detection confidence in the range `[0.0, 1.0]`.
+</ResponseField>
+
+<ResponseField name="timestamp" type="datetime" required>
+  Python `datetime` object representing when the event was detected.
+</ResponseField>
+
+<ResponseField name="bbox" type="tuple[int, int, int, int]" required>
+  Bounding box in pixel coordinates: `(x1, y1, x2, y2)`.
+</ResponseField>
+
+<ResponseField name="count_before" type="int" required>
+  Detected item count in the slot before the event.
+</ResponseField>
+
+<ResponseField name="count_after" type="int" required>
+  Detected item count in the slot after the event.
+</ResponseField>
+
+---
+
+### `SlotDetection`
+
+**Contract C3 (internal to M2)** — represents a single slot's detection result within a `DetectionResult`. Carries enriched context including a stock-level classification.
+
+<ResponseField name="sku_id" type="str" required>
+  Machine-readable product identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="str" required>
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="slot_id" type="int" required>
+  Shelf slot number.
+</ResponseField>
+
+<ResponseField name="bbox" type="tuple[int, int, int, int]" required>
+  Bounding box: `(x1, y1, x2, y2)`.
+</ResponseField>
+
+<ResponseField name="confidence" type="float" required>
+  Detection confidence in `[0.0, 1.0]`.
+</ResponseField>
+
+<ResponseField name="count" type="int" required>
+  Number of product units detected in the slot.
+</ResponseField>
+
+<ResponseField name="stock_level" type="str" required>
+  Categorical stock status: `"ok"` | `"warning"` | `"critical"`.
+</ResponseField>
+
+---
+
+### `DetectionResult`
+
+**Contract C3** — the complete output of one inference pass by the Detection Engine (M2). Aggregates all `SlotDetection` objects produced from a single camera frame.
+
+<ResponseField name="timestamp" type="float" required>
+  Unix timestamp (seconds since epoch) when the frame was processed.
+</ResponseField>
+
+<ResponseField name="counts" type="dict[str, int]" required>
+  Mapping of `sku_id → detected count` across all slots in the frame.
+</ResponseField>
+
+<ResponseField name="detections" type="list[SlotDetection]" required>
+  List of per-slot detection results. Defaults to an empty list.
+</ResponseField>
+
+---
+
+### `ProductStock`
+
+**Contract C5** — the authoritative stock state for a single SKU as maintained by the Inventory Engine (M3). Broadcast on every `inventory_update` and `alert` WebSocket event.
+
+<ResponseField name="sku_id" type="str" required>
+  Machine-readable product identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="str" required>
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="slot_id" type="int" required>
+  Shelf slot number.
+</ResponseField>
+
+<ResponseField name="stock_initial" type="int" required>
+  Stock count at session start (used to compute fill rate).
+</ResponseField>
+
+<ResponseField name="stock_current" type="int" required>
+  Current stock count.
+</ResponseField>
+
+<ResponseField name="stock_min_threshold" type="float" required>
+  Fractional alert threshold. An alert fires when `stock_current / stock_initial` drops below this value (e.g. `0.2` = 20%).
+</ResponseField>
+
+<ResponseField name="is_alert" type="bool" required>
+  `True` if the SKU is currently at or below the alert threshold.
+</ResponseField>
+
+<ResponseField name="last_event" type="datetime | None" required>
+  Datetime of the most recent event affecting this SKU, or `None` if no event has occurred.
+</ResponseField>
+
+---
+
+### `InventoryState`
+
+**Contract C5** — a snapshot of the full shelf inventory at a given point in time, returned by `GET /api/inventory`.
+
+<ResponseField name="last_updated" type="datetime" required>
+  Datetime when the inventory state was last modified.
+</ResponseField>
+
+<ResponseField name="products" type="list[ProductStock]" required>
+  List of `ProductStock` objects for every registered SKU.
+</ResponseField>
+
+---
+
+### `InventoryEvent`
+
+**Contract C5** — the processed, inventory-level record of a stock movement. Produced by `InventoryEngine.process_event()` from a `DetectionEvent` and emitted on `inventory_update` and `detection_event` WebSocket events.
+
+<Note>
+  `InventoryEvent` is distinct from `DetectionEvent`. `DetectionEvent` carries raw vision data (`bbox`, `count_before`, `count_after`), while `InventoryEvent` carries inventory-level data (`stock_before`, `stock_after`) in terms that the dashboard and engines consume.
+</Note>
+
+<ResponseField name="event_id" type="str" required>
+  UUID string uniquely identifying this inventory event.
+</ResponseField>
+
+<ResponseField name="event_type" type="str" required>
+  `"retiro"` or `"devolucion"` as a plain string (not the `EventType` enum).
+</ResponseField>
+
+<ResponseField name="sku_id" type="str" required>
+  Machine-readable product identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="str" required>
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="slot_id" type="int" required>
+  Shelf slot number.
+</ResponseField>
+
+<ResponseField name="stock_before" type="int" required>
+  Inventory stock count before this event was applied.
+</ResponseField>
+
+<ResponseField name="stock_after" type="int" required>
+  Inventory stock count after this event was applied.
+</ResponseField>
+
+<ResponseField name="confidence" type="float" required>
+  Detection confidence forwarded from the originating `DetectionEvent`.
+</ResponseField>
+
+<ResponseField name="timestamp" type="datetime" required>
+  Datetime when the event was processed.
+</ResponseField>
+
+---
+
+### `SKUHistory`
+
+**Contract C6** — aggregated removal history for a single SKU, passed from the Inventory Engine (M3) to the Prediction Engine (M6) to compute depletion rates.
+
+<ResponseField name="sku_id" type="str" required>
+  Machine-readable product identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="str" required>
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="stock_current" type="int" required>
+  Current stock count at the time this history snapshot was taken.
+</ResponseField>
+
+<ResponseField name="stock_initial" type="int" required>
+  Initial stock count (used to compute remaining capacity).
+</ResponseField>
+
+<ResponseField name="events" type="list[datetime]" required>
+  Ordered list of `datetime` timestamps for every removal event recorded for this SKU. The Prediction Engine requires at least **2 entries** to calculate a rate.
+</ResponseField>
+
+---
+
+### `StockPrediction`
+
+**Contract C6** — depletion forecast produced by the Prediction Engine (M6) from a `SKUHistory`. Broadcast on the `prediction_update` WebSocket event and served by `GET /api/predictions`.
+
+<ResponseField name="sku_id" type="str" required>
+  Machine-readable product identifier.
+</ResponseField>
+
+<ResponseField name="sku_name" type="str" required>
+  Human-readable product name.
+</ResponseField>
+
+<ResponseField name="stock_current" type="int" required>
+  Stock count at prediction time.
+</ResponseField>
+
+<ResponseField name="rate_per_hour" type="float" required>
+  Exponentially weighted moving average of removal rate in units per hour (`alpha=0.3`).
+</ResponseField>
+
+<ResponseField name="estimated_depletion" type="datetime | None" required>
+  Predicted datetime when stock reaches zero, or `None` if the rate is zero or indeterminate.
+</ResponseField>
+
+<ResponseField name="minutes_remaining" type="float | None" required>
+  Minutes until predicted depletion, or `None`.
+</ResponseField>
+
+<ResponseField name="trend" type="str" required>
+  Acceleration of demand: `"acelerando"` | `"estable"` | `"desacelerando"`.
+</ResponseField>
+
+<ResponseField name="confidence" type="str" required>
+  Prediction confidence based on sample size: `"alta"` | `"media"` | `"baja"`.
+</ResponseField>
+
+---
+
+### `InteractionEvent`
+
+**Contract C4** — represents a physical interaction with a shelf slot, used by the Heatmap Engine (M7) to build activity maps. Currently emitted with `region=(0, 0, 0, 0)` pending full M2 bounding-box integration.
+
+<ResponseField name="slot_id" type="int" required>
+  Shelf slot where the interaction occurred.
+</ResponseField>
+
+<ResponseField name="sku_id" type="str" required>
+  Product involved in the interaction.
+</ResponseField>
+
+<ResponseField name="region" type="tuple[int, int, int, int]" required>
+  Pixel region of the interaction: `(x1, y1, x2, y2)`.
+</ResponseField>
+
+<ResponseField name="timestamp" type="datetime" required>
+  Datetime of the interaction.
+</ResponseField>
+
+<ResponseField name="interaction_type" type="str" required>
+  `"hand_detected"` | `"product_moved"`.
+</ResponseField>
+
+---
+
+### `NarrativeMessage`
+
+**Contract C7** — a human-readable Spanish message produced by the Narrative Engine (M8) and delivered to the frontend via the `narrative` WebSocket event. Subject to a 30-second cooldown per SKU/message-type pair.
+
+<ResponseField name="message_id" type="str" required>
+  UUID string uniquely identifying this message.
+</ResponseField>
+
+<ResponseField name="severity" type="str" required>
+  `"info"` | `"warning"` | `"critical"`.
+</ResponseField>
+
+<ResponseField name="text" type="str" required>
+  Human-readable Spanish message, e.g. `"⚠️ Nachos Con Sal Naturasol 200gr está al 50% de su capacidad."`.
+</ResponseField>
+
+<ResponseField name="sku_id" type="str | None" required>
+  Related SKU, or `None` for store-wide messages.
+</ResponseField>
+
+<ResponseField name="timestamp" type="datetime" required>
+  Datetime when the message was generated.
+</ResponseField>
+
+<ResponseField name="icon" type="str" required>
+  Emoji icon matching the severity level, e.g. `"⚠️"`, `"🚨"`, `"ℹ️"`.
+</ResponseField>
+
+---
+
+## TypeScript Interfaces (`frontend/src/types/index.ts`)
+
+The frontend mirrors the key backend contracts as TypeScript interfaces. Note that `datetime` fields become `string` (ISO 8601) and some interfaces include additional frontend-only fields (e.g. `source_id`, `alert_level`) used by the dashboard's multi-camera adapter layer.
+
+```typescript
+// ── Products & Inventory ──────────────────────────────────────
+
+export interface ProductStock {
+  sku_id: string;
+  sku_name: string;
+  stock_current: number;
+  stock_initial: number;
+  last_event: string | null;
+  alert_active: boolean;
+  alert_level: "normal" | "low" | "critical";
+  source_id: string;
+}
+
+export interface InventoryState {
+  timestamp: string;
+  products: ProductStock[];
+  total_events: number;
+  source_id: string;
+}
+
+// ── Detection Events ──────────────────────────────────────────
+
+export interface DetectionEvent {
+  event_id: string;
+  sku_id: string;
+  sku_name: string;
+  action: "removed" | "returned";
+  stock_before: number;
+  stock_after: number;
+  timestamp: string;
+  source_id: string;
+}
+
+// ── Predictions ───────────────────────────────────────────────
+
+export interface StockPrediction {
+  sku_id: string;
+  sku_name: string;
+  stock_current: number;
+  rate_per_hour: number;
+  estimated_depletion: string | null;
+  minutes_remaining: number | null;
+  trend: "acelerando" | "estable" | "desacelerando";
+  confidence: "alta" | "media" | "baja";
+  source_id: string;
+}
+
+// ── Narratives ────────────────────────────────────────────────
+
+export interface NarrativeMessage {
+  message_id: string;
+  severity: "info" | "warning" | "critical";
+  text: string;
+  sku_id: string | null;
+  timestamp: string;
+  icon: string;
+  source_id: string;
+}
+```
+
+<Tip>
+  The `useSocket` hook in `frontend/src/hooks/useSocket.ts` includes an `adaptProduct()` function that maps backend `ProductStock` fields (e.g. `is_alert`) to their frontend equivalents (e.g. `alert_active`, `alert_level`) at the WebSocket boundary. This keeps both sides of the contract independent without a shared code-gen step.
+</Tip>
+
+---
+
+## Contract Map
+
+The table below shows which contract is consumed by which engine module.
+
+| Contract | Dataclass(es)                          | Producer | Consumer(s)         |
+| -------- | -------------------------------------- | -------- | ------------------- |
+| C2       | `DetectionEvent`, `EventType`          | M2       | M3                  |
+| C3       | `SlotDetection`, `DetectionResult`     | M2       | M2 (internal)       |
+| C4       | `InteractionEvent`                     | M3       | M7                  |
+| C5       | `ProductStock`, `InventoryState`, `InventoryEvent` | M3 | M4, WebSocket, REST |
+| C6       | `SKUHistory`, `StockPrediction`        | M3       | M6                  |
+| C7       | `NarrativeMessage`                     | M8       | M4, WebSocket       |

@@ -1,0 +1,229 @@
+---
+title: "Detection Engine: YOLOv8-seg Product Recognition"
+sidebarTitle: "Detection Engine"
+description: "The DetectionEngine runs YOLOv8-seg inference on camera frames to count products per slot, compare frames, and emit DetectionEvents for inventory updates."
+---
+
+The **DetectionEngine** is module **M2** of the Anaquel Inteligente 3B pipeline. It loads a fine-tuned YOLOv8-seg model from `models/best3.pt`, runs per-frame inference on BGR images from the camera capture module, counts visible units for each of the 7 product SKUs, and computes frame-over-frame diffs to emit `DetectionEvent` objects consumed by the `InventoryEngine` (M3).
+
+---
+
+## CLASS_NAMES Mapping
+
+The model recognises 7 product classes. Each YOLO class ID maps to an internal `sku_id` and a human-readable display name.
+
+| Class ID | `sku_id` | Display Name |
+|----------|----------------------------------|------------------------------------------------------|
+| `0` | `agua_burst` | Agua Natural Burst 1500 ml |
+| `1` | `burst_energetica_roja` | Bebida Energetica Red Burst 473 ml |
+| `2` | `burst_energy` | Bebida Energetica Original Burst Energy 600 ml |
+| `3` | `nachos_naturasol` | Nachos Con Sal Naturasol 200 gr |
+| `4` | `nebraska_mango` | Bebida Mango-Durazno Nebraska 460 ml |
+| `5` | `sisi_cola` | Refresco Cola Sin Azucar Sisi 355 ml |
+| `6` | `sun_paradise_naranja` | Bebida Naranja Sun Paradise 900 ml |
+
+The mapping is defined in `detection_engine.py` as `CLASS_NAMES` and must stay in sync with `classes.txt` and the dataset YAML used during training.
+
+---
+
+## DetectionEngine Constructor
+
+<ParamField path="model_path" type="str | Path" default="models/best3.pt">
+  Path to the trained YOLOv8-seg weights file relative to the project root.
+</ParamField>
+
+<ParamField path="conf" type="float" default="0.1">
+  Minimum confidence threshold passed to `model.predict()`. Keep low because
+  the anti-flicker mechanism (3-frame consistency) filters false positives
+  downstream.
+</ParamField>
+
+<ParamField path="save_frames" type="bool" default="False">
+  When `True`, every processed frame is annotated with bounding boxes and
+  saved as a JPEG to `backend/debug_frames/`. Useful for tuning and
+  troubleshooting in non-production environments.
+</ParamField>
+
+<ParamField path="imgsz" type="int" default="640">
+  Input image size passed to YOLO inference. Must match the size used during
+  training.
+</ParamField>
+
+<Note>
+  On initialisation the engine performs **3 dummy warm-up inferences** on a
+  black 640×640 frame so that the first real inference does not incur
+  JIT-compilation latency:
+
+  ```python
+  dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+  for _ in range(3):
+      self.model.predict(dummy, conf=self.conf, imgsz=self.imgsz, verbose=False)
+  ```
+</Note>
+
+---
+
+## `detect(frame)` Method
+
+```python
+def detect(self, frame: np.ndarray) -> DetectionResult
+```
+
+Runs YOLO `predict` on a single BGR frame and returns a `DetectionResult`.
+
+<Steps>
+  <Step title="Run inference">
+    Calls `self.model.predict(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)` and iterates over the returned bounding boxes.
+  </Step>
+  <Step title="Count per-SKU detections">
+    For every detected box, looks up the class ID in `CLASS_NAMES` and increments the corresponding `counts[sku_id]` counter. The initial counts dict is pre-populated with `0` for all 7 SKUs.
+  </Step>
+  <Step title="Assign stock_level">
+    A second pass over raw detections computes `pct = count / STOCK_INITIAL` (where `STOCK_INITIAL = 8`) and assigns a stock level string to each `SlotDetection`:
+
+    | Condition | `stock_level` |
+    |-----------|---------------|
+    | `pct > 0.50` | `"ok"` |
+    | `pct > 0.25` | `"warning"` |
+    | `pct ≤ 0.25` | `"critical"` |
+  </Step>
+  <Step title="Return DetectionResult">
+    Returns a `DetectionResult(timestamp, counts, detections)` where `timestamp` is `time.time()`, `counts` is the per-SKU dict, and `detections` is the list of `SlotDetection` objects.
+  </Step>
+</Steps>
+
+**Usage example:**
+
+```python
+import cv2
+from detection_engine import DetectionEngine
+
+engine = DetectionEngine(conf=0.1, save_frames=False)
+
+cap = cv2.VideoCapture(0)
+ret, frame = cap.read()
+if ret:
+    result = engine.detect(frame)
+    print(result.counts)        # {'agua_burst': 3, 'nachos_naturasol': 1, ...}
+    print(result.detections[0]) # SlotDetection(sku_id='agua_burst', stock_level='ok', ...)
+cap.release()
+```
+
+<Tip>
+  Set `save_frames=True` to write annotated debug frames (bounding boxes
+  colour-coded by stock level) to `backend/debug_frames/`. Files are named
+  `frame_NNNN_YYYYMMDD_HHMMSS.jpg`.
+</Tip>
+
+---
+
+## `compare(prev, curr)` Method
+
+```python
+def compare(self, prev: DetectionResult, curr: DetectionResult) -> list[DetectionEvent]
+```
+
+Compares two consecutive `DetectionResult` snapshots and emits `DetectionEvent` objects only when a count change is confirmed to be genuine. Two mechanisms guard against noise:
+
+### Anti-Flicker (Consistency Window)
+
+Raw per-SKU count differences are appended to `_diff_history[sku_id]`. An event is only emitted once **`consistency_frames = 3`** consecutive frames all carry the same-sign difference:
+
+```python
+recent = history[-self.consistency_frames:]
+if not all(d < 0 for d in recent) and not all(d > 0 for d in recent):
+    continue
+```
+
+If the sign is mixed (e.g. `[-1, +1, -1]`) the diff is treated as noise and no event fires. The history for that SKU is only cleared after a confirmed event or when a zero-diff frame resets it.
+
+### Per-Slot Cooldown
+
+Even after the consistency check passes, the engine enforces a per-slot cooldown (default **`cooldown_seconds = 3.0`**). The `_cooldown` dict stores the `time.time()` of the last emitted event per `slot_id`:
+
+```python
+last_event_time = self._cooldown.get(slot_id, 0)
+if time.time() - last_event_time < self.cooldown_seconds:
+    continue
+```
+
+### Returned `DetectionEvent`
+
+Each confirmed event carries:
+
+<ResponseField name="event_id" type="str">
+  UUID v4 string, unique per event.
+</ResponseField>
+
+<ResponseField name="event_type" type="EventType">
+  `EventType.RETIRO` (count went down) or `EventType.DEVOLUCION` (count went up).
+</ResponseField>
+
+<ResponseField name="sku_id / sku_name" type="str">
+  Identifies the affected product.
+</ResponseField>
+
+<ResponseField name="slot_id" type="int">
+  Shelf slot (= YOLO class ID + 1, range 1–7).
+</ResponseField>
+
+<ResponseField name="confidence" type="float">
+  Average confidence score across all detections of that SKU in the current frame.
+</ResponseField>
+
+<ResponseField name="count_before / count_after" type="int">
+  Unit counts from the previous and current `DetectionResult`.
+</ResponseField>
+
+---
+
+## Model Training
+
+The YOLOv8-seg model was trained using `train_model.py` with the following configuration:
+
+<CodeGroup>
+```python train_model.py (core snippet)
+from ultralytics import YOLO
+
+model = YOLO("yolov8n-seg.pt")
+model.train(
+    data="dataset.yaml",
+    task="segment",
+    epochs=50,
+    imgsz=640,
+    batch=8,
+    name="anaquel_3b",
+    project="runs",
+)
+```
+
+```yaml dataset.yaml (expected structure)
+# dataset.yaml — YOLO segmentation format
+path: /path/to/dataset
+train: images/train
+val:   images/val
+
+nc: 7
+names:
+  - agua_burst
+  - burst_energetica_roja
+  - burst_energy
+  - nachos_naturasol
+  - nebraska_mango
+  - sisi_cola
+  - sun_paradise_naranja
+```
+</CodeGroup>
+
+<Note>
+  Multiple training runs are stored under `runs/anaquel_3b*/weights/`. The
+  final production weights were copied to `models/best3.pt`. An intermediate
+  checkpoint is also available at `models/best2.pt`.
+</Note>
+
+<Tip>
+  During development, pass `save_frames=True` when constructing
+  `DetectionEngine` to write annotated frames to `backend/debug_frames/`.
+  This lets you visually verify that bounding boxes and stock-level colours
+  are correct without spinning up the full dashboard.
+</Tip>
